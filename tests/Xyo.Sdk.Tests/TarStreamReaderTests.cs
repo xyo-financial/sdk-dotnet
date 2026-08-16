@@ -104,4 +104,38 @@ public class TarStreamReaderTests
         var ex = await Assert.ThrowsAsync<XyoClientException>(() => TarStreamReader.ReadArchiveAsync(ms, maxTarEntries: 2));
         Assert.Contains("exceeds maximum entry count limit", ex.Message);
     }
+
+    [Fact]
+    public async Task StreamArchiveAsync_StreamsRecordsSuccessfully()
+    {
+        string record1 = @"{ ""merchant"": ""Merchant A"", ""description"": ""Desc A"", ""categories"": [""General""] }";
+        string record2 = @"{ ""merchant"": ""Merchant B"", ""description"": ""Desc B"", ""categories"": [""General""] }";
+
+        byte[] archiveBytes = CreateValidTarGz(
+            ("a.json", record1),
+            ("empty.json", ""),
+            ("b.json", record2)
+        );
+
+        using var ms = new MemoryStream(archiveBytes);
+        var streamed = new System.Collections.Generic.List<Xyo.Generated.Model.EnrichmentResponse>();
+        await foreach (var item in TarStreamReader.StreamArchiveAsync(ms))
+        {
+            streamed.Add(item);
+        }
+
+        Assert.Equal(2, streamed.Count);
+        Assert.Equal("Merchant A", streamed[0].Merchant);
+        Assert.Equal("Merchant B", streamed[1].Merchant);
+    }
+
+    [Fact]
+    public async Task ReadArchiveAsync_CorruptedJson_ThrowsXyoClientException()
+    {
+        byte[] archiveBytes = CreateValidTarGz(("bad.json", "{ not valid json :::"));
+
+        using var ms = new MemoryStream(archiveBytes);
+        var ex = await Assert.ThrowsAsync<XyoClientException>(() => TarStreamReader.ReadArchiveAsync(ms));
+        Assert.Contains("Failed to deserialize JSON record", ex.Message);
+    }
 }

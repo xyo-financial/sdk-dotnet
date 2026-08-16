@@ -175,4 +175,38 @@ public class XyoClientTests
         Assert.Equal("dynamic_token_1", handler.CapturedRequests[0].Headers.Authorization?.Parameter);
         Assert.Equal("dynamic_token_2", handler.CapturedRequests[1].Headers.Authorization?.Parameter);
     }
+
+    [Fact]
+    public async Task EnrichTransactionAsync_UsesJsonContent_SetsApplicationJsonMediaType()
+    {
+        string jsonResponse = @"{ ""merchant"": ""Test"", ""description"": ""Test Description"", ""categories"": [""General""], ""logo"": ""https://cdn.xyo.financial/test.png"", ""location"": ""London"", ""address"": ""1 St"" }";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, jsonResponse);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        await client.EnrichTransactionAsync("Uber Trip", "GB");
+
+        Assert.Single(handler.CapturedRequests);
+        var captured = handler.CapturedRequests[0];
+        Assert.NotNull(captured.Content);
+        Assert.Equal("application/json", captured.Content.Headers.ContentType?.MediaType);
+        string sentBody = await captured.Content.ReadAsStringAsync();
+        Assert.Contains("\"content\":\"Uber Trip\"", sentBody);
+        Assert.Contains("\"countryCode\":\"GB\"", sentBody);
+    }
+
+    [Fact]
+    public async Task EnsureSuccessResponseAsync_MassiveErrorResponse_TruncatesAt64KB()
+    {
+        // 128 KB error string
+        string massiveError = new string('E', 128 * 1024);
+        var handler = new MockHttpMessageHandler(HttpStatusCode.InternalServerError, massiveError);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+        Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
+        Assert.NotNull(ex.RawResponseBody);
+        Assert.Equal(64 * 1024, ex.RawResponseBody.Length);
+    }
 }

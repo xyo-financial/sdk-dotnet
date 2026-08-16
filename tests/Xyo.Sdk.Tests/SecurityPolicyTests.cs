@@ -66,4 +66,31 @@ public class SecurityPolicyTests
         Assert.True(policy.IsExternalStorageHost("download.xyo.financial"));
         Assert.True(policy.IsExternalStorageHost("xyo-financial.s3.amazonaws.com"));
     }
+
+    [Theory]
+    [InlineData("http://localhost:8080/batches/file.tar.gz", "localhost")]
+    [InlineData("http://127.0.0.1:8080/batches/file.tar.gz", "127.0.0.1")]
+    [InlineData("http://[::1]:8080/batches/file.tar.gz", "[::1]")]
+    [InlineData("https://[::1]:8443/batches/file.tar.gz", "[::1]")]
+    public void ValidateDownloadUrl_LoopbackHosts_WhenTrusted_Passes(string url, string trustedHost)
+    {
+        var policy = new DownloadSecurityPolicy(customTrustedHosts: new[] { trustedHost });
+        var uri = policy.ValidateDownloadUrl(url);
+
+        Assert.NotNull(uri);
+        Assert.Equal(trustedHost, uri.Host);
+    }
+
+    [Theory]
+    [InlineData("http://192.168.1.50/file.tar.gz", "192.168.1.50")]
+    [InlineData("http://10.0.0.1/file.tar.gz", "10.0.0.1")]
+    [InlineData("http://[2001:db8::1]/file.tar.gz", "[2001:db8::1]")]
+    public void ValidateDownloadUrl_InsecureRemoteHttp_ThrowsXyoClientException(string url, string trustedHost)
+    {
+        var policy = new DownloadSecurityPolicy(customTrustedHosts: new[] { trustedHost });
+
+        var ex = Assert.Throws<XyoClientException>(() => policy.ValidateDownloadUrl(url));
+        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+        Assert.Contains("Insecure HTTP scheme rejected", ex.Message);
+    }
 }

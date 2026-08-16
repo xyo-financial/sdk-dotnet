@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -117,8 +118,7 @@ public class XyoClient : IXyoClient
 
         ApplyDefaultHeaders(httpRequest);
 
-        string jsonBody = System.Text.Json.JsonSerializer.Serialize(request, DefaultJsonOptions);
-        httpRequest.Content = new StringContent(jsonBody, System.Text.Encoding.UTF8, "application/json");
+        httpRequest.Content = JsonContent.Create(request, options: DefaultJsonOptions);
 
         using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
@@ -173,8 +173,7 @@ public class XyoClient : IXyoClient
 
         ApplyDefaultHeaders(httpRequest);
 
-        string jsonBody = System.Text.Json.JsonSerializer.Serialize(requestList, DefaultJsonOptions);
-        httpRequest.Content = new StringContent(jsonBody, System.Text.Encoding.UTF8, "application/json");
+        httpRequest.Content = JsonContent.Create(requestList, options: DefaultJsonOptions);
 
         using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
@@ -227,6 +226,10 @@ public class XyoClient : IXyoClient
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// <b>Memory Warning:</b> Buffers all deserialized enrichment records into an in-memory list on the heap.
+    /// For high-volume pipelines or large datasets, prefer <see cref="StreamEnrichmentCollectionAsync"/> for streaming processing with an $O(1)$ memory footprint.
+    /// </remarks>
     public async Task<IReadOnlyList<EnrichmentResponse>> DownloadEnrichmentCollectionAsync(string downloadUrl, CancellationToken cancellationToken = default)
     {
         var list = new List<EnrichmentResponse>();
@@ -340,7 +343,19 @@ public class XyoClient : IXyoClient
         {
             try
             {
-                rawPayload = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                const int maxErrorBytes = 64 * 1024; // 64 KB ceiling
+                byte[] buffer = new byte[8192];
+                using var ms = new MemoryStream();
+                int totalRead = 0;
+                int read;
+                while (totalRead < maxErrorBytes &&
+                       (read = await stream.ReadAsync(buffer, 0, Math.Min(buffer.Length, maxErrorBytes - totalRead), cancellationToken).ConfigureAwait(false)) > 0)
+                {
+                    ms.Write(buffer, 0, read);
+                    totalRead += read;
+                }
+                rawPayload = System.Text.Encoding.UTF8.GetString(ms.ToArray());
             }
             catch
             {
