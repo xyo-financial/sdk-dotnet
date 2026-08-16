@@ -1,10 +1,18 @@
 # XYO.Financial SDK for .NET
 
-[![CI / Build & Test](https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml/badge.svg)](https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml)
-[![NuGet Package](https://img.shields.io/nuget/v/Xyo.Sdk.svg)](https://www.nuget.org/packages/Xyo.Sdk)
-[![Target Framework](https://img.shields.io/badge/.NET-8.0%20%7C%209.0-512BD4)](https://dotnet.microsoft.com/)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Security Policy](https://img.shields.io/badge/Security-LTS_Guaranteed-10B981)](SECURITY.md)
+<p align="center">
+    <a href="https://xyo.financial" target="_blank"><img alt=".NET Bot Mascot for XYO.Financial" width="420" src="https://raw.githubusercontent.com/xyo-financial/sdk-dotnet/main/docs/mascot.png" /></a>
+    <br/>
+    <b>Enterprise Financial Transaction Enrichment SDK for .NET 8.0 & 9.0</b>
+</p>
+
+<p align="center">
+    <a href="https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml"><img src="https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml/badge.svg" alt="CI / Build & Test" /></a>
+    <a href="https://www.nuget.org/packages/Xyo.Sdk"><img src="https://img.shields.io/nuget/v/Xyo.Sdk.svg" alt="NuGet Package" /></a>
+    <img src="https://img.shields.io/badge/.NET-8.0%20%7C%209.0-512BD4" alt="Target Framework" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>
+    <a href="SECURITY.md"><img src="https://img.shields.io/badge/Security-LTS_Guaranteed-10B981" alt="Security Policy" /></a>
+</p>
 
 Official, institutional-grade .NET Client SDK for the **[XYO Financial](https://xyo.financial)** AI Transaction Enrichment Platform. Built for Tier-1 banks, payment processors, and fintech platforms demanding high throughput, non-blocking asynchronous I/O, zero memory leaks, and enterprise-grade resilience.
 
