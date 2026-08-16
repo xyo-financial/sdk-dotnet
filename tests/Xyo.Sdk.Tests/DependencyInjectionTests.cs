@@ -1,5 +1,7 @@
 using System;
+using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 using Xunit;
 using Xyo.Sdk.Client;
@@ -20,6 +22,10 @@ public class DependencyInjectionTests
 
         Assert.NotNull(client);
         Assert.IsType<XyoClient>(client);
+
+        var optionsMonitor = serviceProvider.GetRequiredService<IOptionsMonitor<HttpClientFactoryOptions>>();
+        var factoryOptions = optionsMonitor.Get(ServiceCollectionExtensions.HttpClientName);
+        Assert.Equal(Timeout.InfiniteTimeSpan, factoryOptions.HandlerLifetime);
     }
 
     [Fact]
@@ -43,5 +49,27 @@ public class DependencyInjectionTests
         Assert.Equal("https://sandbox.xyo.financial", options.BaseUrl);
         Assert.Equal("custom_trace_id", options.CorrelationId);
         Assert.Equal(TimeSpan.FromSeconds(45), options.Timeout);
+
+        var optionsMonitor = serviceProvider.GetRequiredService<IOptionsMonitor<HttpClientFactoryOptions>>();
+        var factoryOptions = optionsMonitor.Get(ServiceCollectionExtensions.HttpClientName);
+        Assert.Equal(Timeout.InfiniteTimeSpan, factoryOptions.HandlerLifetime);
+    }
+
+    [Fact]
+    public void AddXyoClient_WithExplicitConfig_RegistersAndSetsInfiniteHandlerLifetime()
+    {
+        var services = new ServiceCollection();
+        var config = new XyoClientConfig("xyo_explicit_key");
+        services.AddXyoClient(config);
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var client = serviceProvider.GetRequiredService<IXyoClient>();
+
+        Assert.NotNull(client);
+        Assert.IsType<XyoClient>(client);
+
+        var optionsMonitor = serviceProvider.GetRequiredService<IOptionsMonitor<HttpClientFactoryOptions>>();
+        var factoryOptions = optionsMonitor.Get(ServiceCollectionExtensions.HttpClientName);
+        Assert.Equal(Timeout.InfiniteTimeSpan, factoryOptions.HandlerLifetime);
     }
 }
