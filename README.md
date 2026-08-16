@@ -1,7 +1,7 @@
 # XYO.Financial SDK for .NET
 
 <p align="center">
-    <a href="https://xyo.financial" target="_blank"><img alt=".NET Bot Mascot for XYO.Financial" width="420" src="https://raw.githubusercontent.com/xyo-financial/sdk-dotnet/main/docs/mascot.png" /></a>
+    <a href="https://xyo.financial" target="_blank"><img alt=".NET Bot Mascot for XYO.Financial" width="420" src="docs/mascot.png" /></a>
     <br/>
     <b>Enterprise Financial Transaction Enrichment SDK for .NET 8.0 & 9.0</b>
 </p>
