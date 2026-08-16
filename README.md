@@ -1,4 +1,4 @@
-# 💳 XYO Financial .NET Client SDK
+# XYO.Financial SDK for .NET
 
 [![CI / Build & Test](https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml/badge.svg)](https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml)
 [![NuGet Package](https://img.shields.io/nuget/v/Xyo.Sdk.svg)](https://www.nuget.org/packages/Xyo.Sdk)
