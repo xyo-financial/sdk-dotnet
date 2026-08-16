@@ -269,6 +269,10 @@ public class XyoClient : IXyoClient
         {
             response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new XyoNetworkException($"Network request timed out after {_config.Timeout.TotalSeconds} seconds.", ex);
+        }
         catch (OperationCanceledException)
         {
             throw;
@@ -321,6 +325,10 @@ public class XyoClient : IXyoClient
         {
             return await _httpClient.SendAsync(request, completionOption, cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new XyoNetworkException($"Network request timed out after {_config.Timeout.TotalSeconds} seconds.", ex);
+        }
         catch (OperationCanceledException)
         {
             throw;
@@ -344,18 +352,11 @@ public class XyoClient : IXyoClient
             try
             {
                 using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                const int maxErrorBytes = 64 * 1024; // 64 KB ceiling
-                byte[] buffer = new byte[8192];
-                using var ms = new MemoryStream();
-                int totalRead = 0;
-                int read;
-                while (totalRead < maxErrorBytes &&
-                       (read = await stream.ReadAsync(buffer, 0, Math.Min(buffer.Length, maxErrorBytes - totalRead), cancellationToken).ConfigureAwait(false)) > 0)
-                {
-                    ms.Write(buffer, 0, read);
-                    totalRead += read;
-                }
-                rawPayload = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: false);
+                const int maxChars = 32768;
+                char[] charBuffer = new char[maxChars];
+                int totalCharsRead = await reader.ReadBlockAsync(charBuffer.AsMemory(0, maxChars), cancellationToken).ConfigureAwait(false);
+                rawPayload = new string(charBuffer, 0, totalCharsRead);
             }
             catch
             {

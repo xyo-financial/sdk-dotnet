@@ -1,5 +1,6 @@
 using System;
 using System.Net.Http;
+using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Xyo.Sdk.Client;
@@ -56,7 +57,8 @@ public static class ServiceCollectionExtensions
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(15),
             ConnectTimeout = TimeSpan.FromSeconds(10)
-        });
+        })
+        .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
         services.AddTransient<IXyoClient>(sp =>
         {
@@ -94,7 +96,8 @@ public static class ServiceCollectionExtensions
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(15),
             ConnectTimeout = TimeSpan.FromSeconds(10)
-        });
+        })
+        .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
         services.AddTransient<IXyoClient>(sp =>
         {

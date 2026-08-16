@@ -196,7 +196,7 @@ public class XyoClientTests
     }
 
     [Fact]
-    public async Task EnsureSuccessResponseAsync_MassiveErrorResponse_TruncatesAt64KB()
+    public async Task EnsureSuccessResponseAsync_MassiveErrorResponse_TruncatesAt32KChars()
     {
         // 128 KB error string
         string massiveError = new string('E', 128 * 1024);
@@ -207,6 +207,100 @@ public class XyoClientTests
         var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
         Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
         Assert.NotNull(ex.RawResponseBody);
-        Assert.Equal(64 * 1024, ex.RawResponseBody.Length);
+        Assert.Equal(32768, ex.RawResponseBody.Length);
+    }
+
+    [Fact]
+    public async Task EnsureSuccessResponseAsync_MultiByteUtf8Content_PreservesCharacterBoundariesWithoutCorruption()
+    {
+        // Multi-byte Unicode sequence (Japanese / emojis / Euro sign)
+        string chunk = "⚡ €uro 日本語 🚀 ";
+        var sb = new System.Text.StringBuilder();
+        while (sb.Length < 40000)
+        {
+            sb.Append(chunk);
+        }
+        string massiveUtf8Error = sb.ToString();
+
+        var handler = new MockHttpMessageHandler(HttpStatusCode.InternalServerError, massiveUtf8Error);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+        Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
+        Assert.NotNull(ex.RawResponseBody);
+        Assert.Equal(32768, ex.RawResponseBody.Length);
+        Assert.DoesNotContain("\uFFFD", ex.RawResponseBody);
+    }
+
+    [Fact]
+    public async Task SendRequestAsync_Timeout_ThrowsXyoNetworkExceptionWithTimeoutDetails()
+    {
+        var handler = new MockHttpMessageHandler((_, _) =>
+            throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout of 30 seconds elapsing."));
+        using var httpClient = new HttpClient(handler);
+        var config = new XyoClientConfig("xyo_test_token") { Timeout = TimeSpan.FromSeconds(30) };
+        using var client = new XyoClient(config, httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoNetworkException>(() => client.EnrichTransactionAsync("Uber", "GB", CancellationToken.None));
+        Assert.Contains("Network request timed out after 30 seconds.", ex.Message);
+        Assert.IsType<TaskCanceledException>(ex.InnerException);
+    }
+
+    [Fact]
+    public async Task SendRequestAsync_IntentionalCancellation_RethrowsOperationCanceledException()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var handler = new MockHttpMessageHandler((_, ct) =>
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.EnrichTransactionAsync("Uber", "GB", cts.Token));
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_Timeout_ThrowsXyoNetworkException()
+    {
+        var handler = new MockHttpMessageHandler((_, _) =>
+            throw new TaskCanceledException("The request was canceled due to timeout."));
+        using var httpClient = new HttpClient(handler);
+        var config = new XyoClientConfig("xyo_test_token") { Timeout = TimeSpan.FromSeconds(15) };
+        using var client = new XyoClient(config, httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+            {
+            }
+        });
+        Assert.Contains("Network request timed out after 15 seconds.", ex.Message);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_IntentionalCancellation_RethrowsOperationCanceledException()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var handler = new MockHttpMessageHandler((_, ct) =>
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", cts.Token))
+            {
+            }
+        });
     }
 }
