@@ -1,0 +1,35 @@
+name: Unit Tests & Quality Gates
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - '*'
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    name: Build & Test (.NET 8.0)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore Dependencies
+        run: dotnet restore Xyo.Sdk.sln
+
+      - name: Build Solution
+        run: dotnet build Xyo.Sdk.sln -c Release --no-restore
+
+      - name: Run Tests with Code Coverage
+        run: dotnet test Xyo.Sdk.sln -c Release --no-build --verbosity normal --collect:"XPlat Code Coverage"
+
+      - name: Verify Code Formatting
+        run: dotnet format Xyo.Sdk.sln --verify-no-changes

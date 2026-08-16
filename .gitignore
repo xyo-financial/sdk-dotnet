@@ -1,0 +1,27 @@
+# Build and Output Folders
+bin/
+obj/
+packages/
+TestResults/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+.idea/
+.vscode/
+
+# Coverage and Profiling
+coverage/
+*.coverage
+*.cobertura.xml
+
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Node & OpenAPI generator artifacts
+node_modules/
+.openapi-generator/
+openapitools.json.bak
+specs/

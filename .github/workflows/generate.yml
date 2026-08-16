@@ -1,0 +1,62 @@
+name: Regenerate C# OpenAPI Client
+
+on:
+  repository_dispatch:
+    types: [spec_tagged, spec_updated]
+  workflow_dispatch:
+    inputs:
+      spec_tag:
+        description: 'Tag or branch in xyo-financial/specs to generate from'
+        required: false
+        default: 'main'
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout SDK repository
+        uses: actions/checkout@v4
+
+      - name: Checkout OpenAPI specification
+        uses: actions/checkout@v4
+        with:
+          repository: xyo-financial/specs
+          ref: ${{ github.event.client_payload.tag || inputs.spec_tag || 'main' }}
+          path: specs
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Generate OpenAPI C# client
+        run: |
+          npx -y @openapitools/openapi-generator-cli generate \
+            -i specs/openapi.yml \
+            -g csharp \
+            -o src/Xyo.Generated \
+            --additional-properties=packageName=Xyo.Generated,targetFramework=net8.0,nullableReferenceTypes=true,netCoreProjectFile=true,library=generichost \
+            --global-property apiTests=false,modelTests=false,apiDocs=false,modelDocs=false
+
+          # Clean up specs checkout
+          rm -rf specs
+
+      - name: Build and Test Solution
+        run: |
+          dotnet restore Xyo.Sdk.sln
+          dotnet build Xyo.Sdk.sln -c Release --no-restore
+          dotnet test Xyo.Sdk.sln -c Release --no-build
+
+      - name: Commit regenerated client
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: regenerate OpenAPI client from spec ${{ github.event.client_payload.tag || inputs.spec_tag || 'latest' }}"
+          file_pattern: "src/Xyo.Generated/**"

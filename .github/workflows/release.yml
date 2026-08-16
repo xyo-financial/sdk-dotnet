@@ -1,0 +1,122 @@
+name: Release Pipeline
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  verify-tag:
+    name: Verify Tag Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify Tag is on main Branch
+        run: |
+          git branch -r --contains ${{ github.ref_name }} | grep -E "origin/main" || {
+            echo "Error: Tag must be pushed from the main branch."
+            exit 1;
+          }
+
+  test:
+    name: Run Quality Gates & Tests
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore Dependencies
+        run: dotnet restore Xyo.Sdk.sln
+
+      - name: Build and Test
+        run: dotnet test Xyo.Sdk.sln -c Release --verbosity normal
+
+  publish-release:
+    name: Publish Release & Artifacts
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # 1. Build NuGet Package
+      - name: Pack NuGet Package
+        run: dotnet pack src/Xyo.Sdk/Xyo.Sdk.csproj -c Release -o packages/
+
+      # 2. Build Archive
+      - name: Build Archive
+        run: |
+          git archive --format=tar.gz --prefix=sdk-dotnet-${{ github.ref_name }}/ -o sdk-dotnet-${{ github.ref_name }}.tar.gz HEAD
+
+      # 3. Generate Checksums
+      - name: Generate SHA-256 Checksum
+        run: |
+          sha256sum sdk-dotnet-${{ github.ref_name }}.tar.gz > sdk-dotnet-${{ github.ref_name }}.tar.gz.sha256
+          sha256sum packages/*.nupkg > packages/nupkg-checksums.sha256
+
+      # 4. Generate SBOM (Software Bill of Materials)
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          format: 'spdx-json'
+          output-file: 'sdk-dotnet-${{ github.ref_name }}.spdx.json'
+
+      # 5. Generate GitHub Attestation
+      - name: Generate Artifact Attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'sdk-dotnet-${{ github.ref_name }}.tar.gz'
+
+      # 6. Create GitHub Release with Assets
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sdk-dotnet-${{ github.ref_name }}.tar.gz
+            sdk-dotnet-${{ github.ref_name }}.tar.gz.sha256
+            sdk-dotnet-${{ github.ref_name }}.spdx.json
+            packages/*.nupkg
+            packages/*.snupkg
+            packages/nupkg-checksums.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+      # 7. Publish to NuGet (if secret configured)
+      - name: Publish to NuGet
+        if: env.NUGET_API_KEY != ''
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: dotnet nuget push packages/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+  verify-example:
+    name: Verify Example App
+    needs: publish-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Run Example Application
+        run: dotnet run --project example/Example.csproj
