@@ -213,6 +213,35 @@ public sealed class XyoClientConfig
     }
 
     /// <summary>
+    /// Adds or updates a default HTTP header attached to outbound requests.
+    /// </summary>
+    public XyoClientConfig WithDefaultHeader(string key, string value)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            throw new ArgumentException("Header key cannot be null or empty.", nameof(key));
+        }
+
+        var headers = new Dictionary<string, string>(DefaultHeaders, StringComparer.OrdinalIgnoreCase)
+        {
+            [key] = value
+        };
+
+        return new XyoClientConfig(_apiKey)
+        {
+            ApiKeySupplier = ApiKeySupplier,
+            BaseUrl = BaseUrl,
+            CorrelationId = CorrelationId,
+            Timeout = Timeout,
+            MaxArchiveBytes = MaxArchiveBytes,
+            MaxEntryBytes = MaxEntryBytes,
+            MaxTarEntries = MaxTarEntries,
+            TrustedDownloadHosts = TrustedDownloadHosts,
+            DefaultHeaders = headers
+        };
+    }
+
+    /// <summary>
     /// Redacts credentials in debugger inspections and log representations.
     /// </summary>
     public override string ToString()

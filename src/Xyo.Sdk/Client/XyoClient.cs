@@ -22,7 +22,7 @@ namespace Xyo.Sdk.Client;
 /// <summary>
 /// Production-grade C# client for the XYO Financial AI Transaction Enrichment API.
 /// </summary>
-public class XyoClient : IXyoClient
+public sealed class XyoClient : IXyoClient
 {
     private static readonly Regex CrlfRegex = new(@"[\r\n]", RegexOptions.Compiled);
     private static readonly Regex CountryCodeRegex = new(@"^[A-Za-z]{2}$", RegexOptions.Compiled);
@@ -302,16 +302,16 @@ public class XyoClient : IXyoClient
 
     private void ApplyDefaultHeaders(HttpRequestMessage request)
     {
-        if (!string.IsNullOrWhiteSpace(_config.CorrelationId) && !request.Headers.Contains("X-Correlation-ID"))
+        if (!string.IsNullOrWhiteSpace(_config.CorrelationId) && !request.Headers.NonValidated.Contains("X-Correlation-ID"))
         {
-            request.Headers.Add("X-Correlation-ID", _config.CorrelationId);
+            request.Headers.TryAddWithoutValidation("X-Correlation-ID", _config.CorrelationId);
         }
 
         foreach (var (key, value) in _config.DefaultHeaders)
         {
-            if (!request.Headers.Contains(key))
+            if (!request.Headers.NonValidated.Contains(key))
             {
-                request.Headers.Add(key, value);
+                request.Headers.TryAddWithoutValidation(key, value);
             }
         }
     }

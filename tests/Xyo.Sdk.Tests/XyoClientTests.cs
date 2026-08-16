@@ -303,4 +303,33 @@ public class XyoClientTests
             }
         });
     }
+
+    [Fact]
+    public void XyoClient_IsSealed_SatisfiesSonarQubeS3881()
+    {
+        Assert.True(typeof(XyoClient).IsSealed, "XyoClient must be sealed to conform to SonarQube rule S3881.");
+    }
+
+    [Fact]
+    public async Task ApplyDefaultHeaders_ContentHeaderAndCustomHeaders_TryAddWithoutValidationAppliesHeadersSuccessfully()
+    {
+        string jsonResponse = @"{ ""merchant"": ""Test"", ""description"": ""Test"", ""categories"": [], ""logo"": """", ""location"": """", ""address"": """" }";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, jsonResponse);
+        using var httpClient = new HttpClient(handler);
+        var config = new XyoClientConfig("xyo_test_token")
+            .WithCorrelationId("test-corr-id")
+            .WithDefaultHeader("Content-Type", "application/json; custom=val")
+            .WithDefaultHeader("X-Custom-Tenant", "tenant-123");
+        using var client = new XyoClient(config, httpClient);
+
+        var result = await client.EnrichTransactionAsync("Uber Trip", "GB");
+
+        Assert.NotNull(result);
+        Assert.Single(handler.CapturedRequests);
+        var captured = handler.CapturedRequests[0];
+        Assert.True(captured.Headers.Contains("X-Correlation-ID"));
+        Assert.Equal("test-corr-id", captured.Headers.GetValues("X-Correlation-ID").First());
+        Assert.True(captured.Headers.Contains("X-Custom-Tenant"));
+        Assert.Equal("tenant-123", captured.Headers.GetValues("X-Custom-Tenant").First());
+    }
 }
