@@ -26,6 +26,10 @@ public static class TarStreamReader
     /// <summary>
     /// Reads and deserializes all enrichment records from a compressed .tar.gz stream into a list.
     /// </summary>
+    /// <remarks>
+    /// <b>Memory Warning:</b> Buffers all deserialized enrichment records into an in-memory list on the heap.
+    /// For high-volume pipelines or large datasets, prefer <see cref="StreamArchiveAsync"/> for streaming processing with an $O(1)$ memory footprint.
+    /// </remarks>
     public static async Task<IReadOnlyList<EnrichmentResponse>> ReadArchiveAsync(
         Stream compressedStream,
         long maxArchiveBytes = 104_857_600, // 100 MiB
@@ -108,38 +112,30 @@ public static class TarStreamReader
                 continue;
             }
 
-            if (entry.DataStream == null)
+            if (entry.DataStream == null || entry.Length == 0)
             {
                 continue;
             }
 
-            // Read entry content with per-entry byte ceiling
-            using var ms = new MemoryStream();
-            byte[] buffer = new byte[8192];
-            long entryBytesRead = 0;
-
-            int bytesRead;
-            while ((bytesRead = await entry.DataStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
+            if (entry.Length > maxEntryBytes)
             {
-                entryBytesRead += bytesRead;
-                if (entryBytesRead > maxEntryBytes)
-                {
-                    throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
-                        $"Tar entry '{entryName}' exceeds maximum size limit ({maxEntryBytes} bytes). Decompression bomb rejected.");
-                }
-                ms.Write(buffer, 0, bytesRead);
-            }
-
-            ms.Position = 0;
-            if (ms.Length == 0)
-            {
-                continue;
+                throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
+                    $"Tar entry '{entryName}' exceeds maximum size limit ({maxEntryBytes} bytes). Decompression bomb rejected.");
             }
 
             EnrichmentResponse? response;
             try
             {
-                response = await JsonSerializer.DeserializeAsync<EnrichmentResponse>(ms, JsonOptions, cancellationToken).ConfigureAwait(false);
+                var entryBoundedStream = new BoundedReadStream(entry.DataStream, maxEntryBytes, entryName);
+                response = await JsonSerializer.DeserializeAsync<EnrichmentResponse>(entryBoundedStream, JsonOptions, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (XyoClientException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -184,12 +180,14 @@ public static class TarStreamReader
     {
         private readonly Stream _innerStream;
         private readonly long _maxBytes;
+        private readonly string? _entryName;
         private long _totalBytesRead;
 
-        public BoundedReadStream(Stream innerStream, long maxBytes)
+        public BoundedReadStream(Stream innerStream, long maxBytes, string? entryName = null)
         {
-            _innerStream = innerStream;
+            _innerStream = innerStream ?? throw new ArgumentNullException(nameof(innerStream));
             _maxBytes = maxBytes;
+            _entryName = entryName;
         }
 
         public override bool CanRead => _innerStream.CanRead;
@@ -206,8 +204,7 @@ public static class TarStreamReader
                 _totalBytesRead += read;
                 if (_totalBytesRead > _maxBytes)
                 {
-                    throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
-                        $"Archive download exceeded maximum allowed byte size ({_maxBytes} bytes). Decompression bomb ingestion rejected.");
+                    ThrowMaxBytesExceeded();
                 }
             }
             return read;
@@ -221,11 +218,22 @@ public static class TarStreamReader
                 _totalBytesRead += read;
                 if (_totalBytesRead > _maxBytes)
                 {
-                    throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
-                        $"Archive download exceeded maximum allowed byte size ({_maxBytes} bytes). Decompression bomb ingestion rejected.");
+                    ThrowMaxBytesExceeded();
                 }
             }
             return read;
+        }
+
+        private void ThrowMaxBytesExceeded()
+        {
+            if (!string.IsNullOrWhiteSpace(_entryName))
+            {
+                throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
+                    $"Tar entry '{_entryName}' exceeds maximum size limit ({_maxBytes} bytes). Decompression bomb rejected.");
+            }
+
+            throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
+                $"Archive download exceeded maximum allowed byte size ({_maxBytes} bytes). Decompression bomb ingestion rejected.");
         }
 
         public override void Flush() => _innerStream.Flush();

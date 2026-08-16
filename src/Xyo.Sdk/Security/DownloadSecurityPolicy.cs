@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Net;
 using Xyo.Sdk.Exceptions;
 
 namespace Xyo.Sdk.Security;
@@ -72,7 +73,10 @@ public class DownloadSecurityPolicy
             {
                 // Reject insecure HTTP for remote targets
                 bool isLocalhost = string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase) ||
-                                   string.Equals(uri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase);
+                                   string.Equals(uri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(uri.Host, "[::1]", StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(uri.Host, "::1", StringComparison.OrdinalIgnoreCase) ||
+                                   (IPAddress.TryParse(uri.Host.Trim('[', ']'), out var ip) && IPAddress.IsLoopback(ip));
                 if (!isLocalhost)
                 {
                     throw new XyoClientException(System.Net.HttpStatusCode.BadRequest, "Insecure HTTP scheme rejected for remote archive download. HTTPS is strictly mandated.");

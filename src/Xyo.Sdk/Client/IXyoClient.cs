@@ -49,6 +49,11 @@ public interface IXyoClient : IDisposable
     /// <summary>
     /// Downloads, verifies, and decompresses the .tar.gz results archive of a completed bulk enrichment job into memory-safe model instances.
     /// </summary>
+    /// <remarks>
+    /// <b>Memory Warning:</b> This method buffers all deserialized enrichment records into an in-memory list on the heap (<c>List&lt;EnrichmentResponse&gt;</c>).
+    /// For high-volume pipelines, large batches, or memory-constrained environments, use <see cref="StreamEnrichmentCollectionAsync"/>
+    /// to stream and process records with an $O(1)$ memory footprint via <see cref="IAsyncEnumerable{T}"/>.
+    /// </remarks>
     /// <param name="downloadUrl">Archive download URL obtained from <see cref="EnrichTransactionCollectionResponse"/>.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Read-only list of all enriched transaction records.</returns>
