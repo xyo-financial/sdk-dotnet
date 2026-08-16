@@ -176,7 +176,7 @@ public static class TarStreamReader
         }
     }
 
-    private sealed class BoundedReadStream : Stream
+    internal sealed class BoundedReadStream : Stream
     {
         private readonly Stream _innerStream;
         private readonly long _maxBytes;
@@ -213,6 +213,20 @@ public static class TarStreamReader
         public override int Read(byte[] buffer, int offset, int count)
         {
             int read = _innerStream.Read(buffer, offset, count);
+            if (read > 0)
+            {
+                _totalBytesRead += read;
+                if (_totalBytesRead > _maxBytes)
+                {
+                    ThrowMaxBytesExceeded();
+                }
+            }
+            return read;
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            int read = _innerStream.Read(buffer);
             if (read > 0)
             {
                 _totalBytesRead += read;

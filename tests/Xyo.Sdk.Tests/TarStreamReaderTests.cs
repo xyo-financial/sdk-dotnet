@@ -138,4 +138,49 @@ public class TarStreamReaderTests
         var ex = await Assert.ThrowsAsync<XyoClientException>(() => TarStreamReader.ReadArchiveAsync(ms));
         Assert.Contains("Failed to deserialize JSON record", ex.Message);
     }
+
+    [Fact]
+    public void BoundedReadStream_ReadSpan_ReadsExpectedDataSuccessfully()
+    {
+        byte[] sourceData = Encoding.UTF8.GetBytes("Hello, BoundedReadStream Span Read!");
+        using var memoryStream = new MemoryStream(sourceData);
+        using var boundedStream = new TarStreamReader.BoundedReadStream(memoryStream, maxBytes: 1000);
+
+        Span<byte> buffer = stackalloc byte[10];
+        int bytesRead = boundedStream.Read(buffer);
+
+        Assert.Equal(10, bytesRead);
+        Assert.Equal("Hello, Bou", Encoding.UTF8.GetString(buffer));
+    }
+
+    [Fact]
+    public void BoundedReadStream_ReadSpan_ExceedingLimit_ThrowsXyoClientException()
+    {
+        byte[] sourceData = new byte[200];
+        using var memoryStream = new MemoryStream(sourceData);
+        using var boundedStream = new TarStreamReader.BoundedReadStream(memoryStream, maxBytes: 50, entryName: "test.json");
+
+        var ex = Assert.Throws<XyoClientException>(() =>
+        {
+            Span<byte> buffer = new byte[100];
+            boundedStream.Read(buffer);
+        });
+        Assert.Contains("exceeds maximum size limit", ex.Message);
+        Assert.Contains("test.json", ex.Message);
+    }
+
+    [Fact]
+    public void BoundedReadStream_ReadSpan_ReturnsZeroAtEndOfStream()
+    {
+        byte[] sourceData = [1, 2, 3];
+        using var memoryStream = new MemoryStream(sourceData);
+        using var boundedStream = new TarStreamReader.BoundedReadStream(memoryStream, maxBytes: 100);
+
+        Span<byte> buffer = stackalloc byte[10];
+        int bytesRead1 = boundedStream.Read(buffer);
+        Assert.Equal(3, bytesRead1);
+
+        int bytesRead2 = boundedStream.Read(buffer);
+        Assert.Equal(0, bytesRead2);
+    }
 }
