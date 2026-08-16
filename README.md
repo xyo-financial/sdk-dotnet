@@ -3,7 +3,7 @@
 <p align="center">
     <a href="https://xyo.financial" target="_blank"><img alt=".NET Bot Mascot for XYO.Financial" width="420" src="docs/mascot.png" /></a>
     <br/>
-    <b>Enterprise Financial Transaction Enrichment SDK for .NET 8.0 & 9.0</b>
+    <b>Financial Transaction Enrichment SDK for .NET 8.0 & 9.0</b>
 </p>
 
 <p align="center">
@@ -234,7 +234,7 @@ catch (XyoNetworkException ex)
 
 ---
 
-## 🔒 Enterprise Security & Defensive Architecture
+## 🔒 Security & Defensive Architecture
 
 - **Zero-Trust Domain Egress Allowlist:** Validates all archive download URLs against pinned official domains (`api.xyo.financial`, `download.xyo.financial`, AWS S3 storage hosts) and strictly rejects cleartext HTTP.
 - **Credential Leakage Prevention:** Strips Bearer authorization headers when following download links to third-party or S3 storage buckets.
