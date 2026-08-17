@@ -15,7 +15,10 @@ public class DependencyInjectionTests
     public void AddXyoClient_WithApiKey_RegistersServiceCorrectly()
     {
         var services = new ServiceCollection();
-        services.AddXyoClient("xyo_di_key_123");
+        var builder = services.AddXyoClient("xyo_di_key_123");
+
+        Assert.NotNull(builder);
+        Assert.Equal(ServiceCollectionExtensions.HttpClientName, builder.Name);
 
         using var serviceProvider = services.BuildServiceProvider();
         var client = serviceProvider.GetRequiredService<IXyoClient>();
@@ -32,13 +35,16 @@ public class DependencyInjectionTests
     public void AddXyoClient_WithOptionsDelegate_RegistersAndAppliesOptions()
     {
         var services = new ServiceCollection();
-        services.AddXyoClient(options =>
+        var builder = services.AddXyoClient(options =>
         {
             options.ApiKey = "xyo_custom_key";
             options.BaseUrl = "https://sandbox.xyo.financial";
             options.CorrelationId = "custom_trace_id";
             options.Timeout = TimeSpan.FromSeconds(45);
         });
+
+        Assert.NotNull(builder);
+        Assert.Equal(ServiceCollectionExtensions.HttpClientName, builder.Name);
 
         using var serviceProvider = services.BuildServiceProvider();
         var client = serviceProvider.GetRequiredService<IXyoClient>();
@@ -60,7 +66,10 @@ public class DependencyInjectionTests
     {
         var services = new ServiceCollection();
         var config = new XyoClientConfig("xyo_explicit_key");
-        services.AddXyoClient(config);
+        var builder = services.AddXyoClient(config);
+
+        Assert.NotNull(builder);
+        Assert.Equal(ServiceCollectionExtensions.HttpClientName, builder.Name);
 
         using var serviceProvider = services.BuildServiceProvider();
         var client = serviceProvider.GetRequiredService<IXyoClient>();
