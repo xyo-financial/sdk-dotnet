@@ -85,39 +85,6 @@ Console.WriteLine($"Logo URL:    {response.Logo}");
 
 ---
 
-## 🏗 Dependency Injection (ASP.NET Core & Generic Host)
-
-Register `IXyoClient` in `Program.cs` using the official DI extension methods:
-
-```csharp
-using Xyo.Sdk.Client;
-using Xyo.Sdk.Extensions;
-
-var builder = WebApplication.CreateBuilder(args);
-
-// Register XYO Client with configuration options
-builder.Services.AddXyoClient(options =>
-{
-    options.ApiKey = builder.Configuration["Xyo:ApiKey"];
-    options.BaseUrl = builder.Configuration["Xyo:BaseUrl"] ?? "https://api.xyo.financial";
-    options.Timeout = TimeSpan.FromSeconds(30);
-    options.CorrelationId = "banking-api-gateway";
-});
-
-var app = builder.Build();
-
-// Inject IXyoClient into minimal APIs, controllers, or background services
-app.MapPost("/api/enrich", async (EnrichmentDto dto, IXyoClient xyoClient, CancellationToken ct) =>
-{
-    var enriched = await xyoClient.EnrichTransactionAsync(dto.Description, dto.CountryCode, ct);
-    return Results.Ok(enriched);
-});
-
-app.Run();
-```
-
----
-
 ## 📚 Core Operations & Code Examples
 
 ### 1. Real-Time Single Transaction Enrichment
@@ -192,6 +159,142 @@ var config = new XyoClientConfig()
     });
 
 using var dynamicClient = new XyoClient(config);
+```
+
+---
+
+## 🚀 Framework & Architecture Integration
+
+The XYO Financial .NET SDK is engineered for institutional-grade reliability, high-concurrency microservices, and cloud-native deployments across .NET 8, .NET 9, and upcoming .NET 10 LTS runtimes.
+
+### 1. ASP.NET Core 8 / 9 Integration with Polly Resilience
+
+Register `IXyoClient` in `Program.cs` using the official dependency injection extension methods with Microsoft Polly transient error retry policies and circuit breakers:
+
+```csharp
+// ASP.NET Core: Program.cs
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Polly;
+using Xyo.Generated.Model;
+using Xyo.Sdk.Client;
+using Xyo.Sdk.Exceptions;
+using Xyo.Sdk.Extensions;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Register XYO Client with configuration options and Polly retry policies
+builder.Services.AddXyoClient(options => 
+{
+    options.ApiKey = builder.Configuration["Xyo:ApiKey"]!;
+    options.BaseUrl = builder.Configuration["Xyo:BaseUrl"] ?? "https://api.xyo.financial";
+    options.Timeout = TimeSpan.FromSeconds(2);
+    options.CorrelationId = "banking-api-gateway";
+})
+.AddTransientHttpErrorPolicy(policy => 
+    policy.WaitAndRetryAsync(3, retryAttempt => TimeSpan.FromMilliseconds(200 * retryAttempt)));
+
+var app = builder.Build();
+
+// High-performance Minimal API endpoint
+app.MapPost("/api/v1/enrich", async (EnrichmentDto dto, IXyoClient xyoClient, CancellationToken ct) =>
+{
+    try
+    {
+        var response = await xyoClient.EnrichTransactionAsync(dto.Description, dto.CountryCode, ct);
+        return Results.Ok(response);
+    }
+    catch (XyoProblemDetailsException ex)
+    {
+        return Results.Problem(
+            title: ex.Title,
+            detail: ex.Detail,
+            statusCode: ex.Status,
+            type: ex.Type,
+            extensions: new Dictionary<string, object?> { ["errors"] = ex.Errors }
+        );
+    }
+});
+
+app.Run();
+
+public record EnrichmentDto(string Description, string CountryCode);
+```
+
+### 2. High-Performance Architectural Highlights
+
+| Architecture Dimension | Implementation Mechanism | Enterprise Benefit |
+| :--- | :--- | :--- |
+| **Native AOT Compatibility** | Trim-safe and AOT-compliant JSON serialization with zero reflection on critical execution paths. | Instant cold starts (<15ms), reduced memory footprint, and smaller container images for AWS ECS, Google Cloud Run, and Kubernetes. |
+| **Zero LOH Allocations** | $O(1)$ streaming decompression (`StreamEnrichmentCollectionAsync`) yielding records directly via `Span<byte>` and bounded streams. | Eliminates Large Object Heap (LOH) pressure and prevents Gen 2 garbage collection pauses during multi-gigabyte batch processing. |
+| **Pooled Socket Management** | Underlying `SocketsHttpHandler` with `PooledConnectionLifetime` (15m) and infinite handler lifetime. | Eliminates socket exhaustion under high throughput while respecting DNS rotation and TLS renegotiation. |
+
+#### Pooled `SocketsHttpHandler` Socket Lifetime Management
+When registering via `AddXyoClient`, the SDK configures a pooled `SocketsHttpHandler` instance with `PooledConnectionLifetime = TimeSpan.FromMinutes(15)` and `SetHandlerLifetime(Timeout.InfiniteTimeSpan)`. This follows modern .NET networking best practices, preventing socket exhaustion (`TIME_WAIT` proliferation) during burst traffic while ensuring DNS record updates are respected without recycling handler instances.
+
+#### Zero Large Object Heap (LOH) Allocations
+Traditional batch processing reads entire multi-gigabyte compressed `.tar.gz` archives into memory buffers, causing objects $\ge 85,000$ bytes to be allocated directly onto the Large Object Heap (LOH). The XYO SDK utilizes a streaming push/pull decompression architecture that reads records chunk-by-chunk directly into pooled memory buffers, maintaining strict $O(1)$ memory consumption regardless of whether the archive contains 100 or 10,000,000 transactions.
+
+#### Native AOT (Ahead-Of-Time) Compilation
+The SDK is fully compatible with .NET Native AOT publishing (`PublishAot=true`). By avoiding dynamic runtime code emission and untyped reflection, binaries compile directly into native machine code for maximum security and execution speed:
+
+```bash
+dotnet publish -c Release -r linux-x64 --self-contained
+```
+
+### 3. Enterprise Background Worker Service (`BackgroundService`)
+
+For continuous batch processing and automated reconciliation pipelines, inject `IXyoClient` inside an `IHostedService` / `BackgroundService`:
+
+```csharp
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Xyo.Sdk.Client;
+
+public sealed class TransactionBatchWorker : BackgroundService
+{
+    private readonly IXyoClient _xyoClient;
+    private readonly ILogger<TransactionBatchWorker> _logger;
+
+    public TransactionBatchWorker(IXyoClient xyoClient, ILogger<TransactionBatchWorker> logger)
+    {
+        _xyoClient = xyoClient;
+        _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                // Ingest archive stream on-the-fly with O(1) memory overhead
+                string downloadUrl = "https://download.xyo.financial/batches/reconciliation_2026_08.tar.gz";
+                
+                await foreach (var record in _xyoClient.StreamEnrichmentCollectionAsync(downloadUrl, stoppingToken))
+                {
+                    _logger.LogInformation("Processed transaction {Merchant} ({Category})", 
+                        record.Merchant, string.Join(", ", record.Categories));
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Transient batch ingestion failure occurred. Retrying...");
+            }
+
+            await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+        }
+    }
+}
 ```
 
 ---

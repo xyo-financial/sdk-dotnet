@@ -22,8 +22,8 @@ public static class ServiceCollectionExtensions
     /// </summary>
     /// <param name="services">The service collection.</param>
     /// <param name="apiKey">The static API key.</param>
-    /// <returns>The service collection for chaining.</returns>
-    public static IServiceCollection AddXyoClient(this IServiceCollection services, string apiKey)
+    /// <returns>An <see cref="IHttpClientBuilder"/> that can be used to configure the client handler and resilience policies.</returns>
+    public static IHttpClientBuilder AddXyoClient(this IServiceCollection services, string apiKey)
     {
         return services.AddXyoClient(options => options.ApiKey = apiKey);
     }
@@ -33,8 +33,8 @@ public static class ServiceCollectionExtensions
     /// </summary>
     /// <param name="services">The service collection.</param>
     /// <param name="configureOptions">Delegate to configure client options.</param>
-    /// <returns>The service collection for chaining.</returns>
-    public static IServiceCollection AddXyoClient(this IServiceCollection services, Action<XyoClientOptions> configureOptions)
+    /// <returns>An <see cref="IHttpClientBuilder"/> that can be used to configure the client handler and resilience policies.</returns>
+    public static IHttpClientBuilder AddXyoClient(this IServiceCollection services, Action<XyoClientOptions> configureOptions)
     {
         if (services == null)
         {
@@ -48,7 +48,7 @@ public static class ServiceCollectionExtensions
 
         services.Configure(configureOptions);
 
-        services.AddHttpClient(HttpClientName, (sp, client) =>
+        var builder = services.AddHttpClient(HttpClientName, (sp, client) =>
         {
             var options = sp.GetRequiredService<IOptions<XyoClientOptions>>().Value;
             client.Timeout = options.Timeout;
@@ -70,13 +70,16 @@ public static class ServiceCollectionExtensions
             return new XyoClient(config, httpClient);
         });
 
-        return services;
+        return builder;
     }
 
     /// <summary>
     /// Adds and configures the XYO Financial SDK client with an explicit <see cref="XyoClientConfig"/>.
     /// </summary>
-    public static IServiceCollection AddXyoClient(this IServiceCollection services, XyoClientConfig config)
+    /// <param name="services">The service collection.</param>
+    /// <param name="config">The explicit client configuration.</param>
+    /// <returns>An <see cref="IHttpClientBuilder"/> that can be used to configure the client handler and resilience policies.</returns>
+    public static IHttpClientBuilder AddXyoClient(this IServiceCollection services, XyoClientConfig config)
     {
         if (services == null)
         {
@@ -88,7 +91,7 @@ public static class ServiceCollectionExtensions
             throw new ArgumentNullException(nameof(config));
         }
 
-        services.AddHttpClient(HttpClientName, client =>
+        var builder = services.AddHttpClient(HttpClientName, client =>
         {
             client.Timeout = config.Timeout;
         })
@@ -106,6 +109,6 @@ public static class ServiceCollectionExtensions
             return new XyoClient(config, httpClient);
         });
 
-        return services;
+        return builder;
     }
 }
