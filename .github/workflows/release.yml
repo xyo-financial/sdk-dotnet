@@ -48,6 +48,7 @@ jobs:
     name: Publish Release & Artifacts
     needs: test
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
@@ -99,12 +100,15 @@ jobs:
           draft: false
           prerelease: false
 
-      # 7. Publish to NuGet (if secret configured)
+      # 7. Publish to NuGet (via OIDC Trusted Publishing)
+      - name: NuGet login
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: syniol
+
       - name: Publish to NuGet
-        if: env.NUGET_API_KEY != ''
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: dotnet nuget push packages/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push packages/*.nupkg --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   verify-example:
     name: Verify Example App
