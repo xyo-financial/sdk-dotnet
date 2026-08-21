@@ -1,23 +1,15 @@
-<p align="center">
-  <a href="https://xyo.financial" target="_blank" rel="noopener noreferrer">
-    <img alt="XYO Financial .NET Mascot" width="380" src="https://raw.githubusercontent.com/xyo-financial/sdk-dotnet/main/docs/mascot.png" />
-  </a>
-</p>
+# XYO Financial SDK for .NET
 
-<h1 align="center">XYO Financial SDK for .NET</h1>
+[![XYO Financial .NET Mascot](https://raw.githubusercontent.com/xyo-financial/sdk-dotnet/main/docs/mascot.png)](https://xyo.financial)
 
-<p align="center">
-  <a href="https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml"><img src="https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml/badge.svg" alt="CI / Build & Test" /></a>
-  <a href="https://www.nuget.org/packages/Xyo.Sdk"><img src="https://img.shields.io/nuget/v/Xyo.Sdk.svg" alt="NuGet Package" /></a>
-  <img src="https://img.shields.io/badge/.NET-8.0%20%7C%209.0-512BD4" alt="Target Framework" />
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>
-  <a href="SECURITY.md"><img src="https://img.shields.io/badge/Security-LTS_Guaranteed-10B981" alt="Security Policy" /></a>
-</p>
+[![CI / Build & Test](https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml/badge.svg)](https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml)
+[![NuGet Package](https://img.shields.io/nuget/v/Xyo.Sdk.svg)](https://www.nuget.org/packages/Xyo.Sdk)
+![Target Framework](https://img.shields.io/badge/.NET-8.0%20%7C%209.0-512BD4)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/xyo-financial/sdk-dotnet/blob/main/LICENSE)
+[![Security Policy](https://img.shields.io/badge/Security-LTS_Guaranteed-10B981)](https://github.com/xyo-financial/sdk-dotnet/blob/main/SECURITY.md)
 
-<p align="center">
-  <strong>The official .NET SDK for <a href="https://xyo.financial">XYO Financial</a>.</strong><br>
-  Seamlessly enrich raw financial transactions into clean merchant profiles, intelligent business categorizations, high-res logos, and geolocated address metadata using AI-powered enrichment pipelines.
-</p>
+**The official .NET SDK for [XYO Financial](https://xyo.financial).**  
+Seamlessly enrich raw financial transactions into clean merchant profiles, intelligent business categorizations, high-res logos, and geolocated address metadata using AI-powered enrichment pipelines.
 
 ---
 
@@ -59,7 +51,7 @@ Install-Package Xyo.Sdk
 
 ### PackageReference
 ```xml
-<PackageReference Include="Xyo.Sdk" Version="2.0.0" />
+<PackageReference Include="Xyo.Sdk" Version="2.0.1" />
 ```
 
 ---
