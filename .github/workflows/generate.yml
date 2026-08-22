@@ -51,9 +51,10 @@ jobs:
           cp -r /tmp/csharp-gen/src/Xyo.Generated/* src/Xyo.Generated/
           rm -rf /tmp/csharp-gen specs
 
-      - name: Build and Test Solution
+      - name: Build, Format and Test Solution
         run: |
           dotnet restore Xyo.Sdk.sln
+          dotnet format Xyo.Sdk.sln
           dotnet build Xyo.Sdk.sln -c Release --no-restore
           dotnet test Xyo.Sdk.sln -c Release --no-build
 
