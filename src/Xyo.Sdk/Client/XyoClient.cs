@@ -93,13 +93,37 @@ public sealed class XyoClient : IXyoClient
     /// <inheritdoc />
     public Task<EnrichmentResponse> EnrichTransactionAsync(string content, string countryCode, CancellationToken cancellationToken = default)
     {
-        ValidateTransactionInput(content, countryCode, out string normalizedCountryCode);
-        var request = new EnrichmentRequest(content: content, countryCode: normalizedCountryCode);
-        return EnrichTransactionAsync(request, cancellationToken);
+        return EnrichTransactionAsync(content, countryCode, (string?)null, null, cancellationToken);
     }
 
     /// <inheritdoc />
-    public async Task<EnrichmentResponse> EnrichTransactionAsync(EnrichmentRequest request, CancellationToken cancellationToken = default)
+    public Task<EnrichmentResponse> EnrichTransactionAsync(string content, string countryCode, Guid? correlationId, string? traceparent = null, CancellationToken cancellationToken = default)
+    {
+        return EnrichTransactionAsync(content, countryCode, correlationId?.ToString(), traceparent, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<EnrichmentResponse> EnrichTransactionAsync(string content, string countryCode, string? correlationId, string? traceparent = null, CancellationToken cancellationToken = default)
+    {
+        ValidateTransactionInput(content, countryCode, out string normalizedCountryCode);
+        var request = new EnrichmentRequest(content: content, countryCode: normalizedCountryCode);
+        return EnrichTransactionAsync(request, correlationId, traceparent, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<EnrichmentResponse> EnrichTransactionAsync(EnrichmentRequest request, CancellationToken cancellationToken = default)
+    {
+        return EnrichTransactionAsync(request, (string?)null, null, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<EnrichmentResponse> EnrichTransactionAsync(EnrichmentRequest request, Guid? correlationId, string? traceparent = null, CancellationToken cancellationToken = default)
+    {
+        return EnrichTransactionAsync(request, correlationId?.ToString(), traceparent, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<EnrichmentResponse> EnrichTransactionAsync(EnrichmentRequest request, string? correlationId, string? traceparent = null, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         if (request == null)
@@ -116,7 +140,7 @@ public sealed class XyoClient : IXyoClient
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-        ApplyDefaultHeaders(httpRequest);
+        ApplyDefaultHeaders(httpRequest, correlationId, traceparent);
 
         httpRequest.Content = JsonContent.Create(request, options: DefaultJsonOptions);
 
@@ -130,9 +154,31 @@ public sealed class XyoClient : IXyoClient
     }
 
     /// <inheritdoc />
-    public async Task<EnrichTransactionCollectionResponse> EnrichTransactionsAsync(
+    public Task<EnrichTransactionCollectionResponse> EnrichTransactionsAsync(
         IEnumerable<EnrichmentRequest> requests,
         string? apiUser = null,
+        CancellationToken cancellationToken = default)
+    {
+        return EnrichTransactionsAsync(requests, apiUser, (string?)null, null, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<EnrichTransactionCollectionResponse> EnrichTransactionsAsync(
+        IEnumerable<EnrichmentRequest> requests,
+        string? apiUser,
+        Guid? correlationId,
+        string? traceparent = null,
+        CancellationToken cancellationToken = default)
+    {
+        return EnrichTransactionsAsync(requests, apiUser, correlationId?.ToString(), traceparent, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<EnrichTransactionCollectionResponse> EnrichTransactionsAsync(
+        IEnumerable<EnrichmentRequest> requests,
+        string? apiUser,
+        string? correlationId,
+        string? traceparent = null,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -144,7 +190,11 @@ public sealed class XyoClient : IXyoClient
         var requestList = requests.ToList();
         if (requestList.Count == 0)
         {
-            throw new XyoClientException(HttpStatusCode.BadRequest, "Transaction collection batch cannot be empty.");
+            throw new XyoClientException(HttpStatusCode.BadRequest, "Transaction collection batch cannot be empty. Must contain between 1 and 50,000 items.");
+        }
+        if (requestList.Count > 50_000)
+        {
+            throw new XyoClientException(HttpStatusCode.BadRequest, $"Transaction collection batch size of {requestList.Count} exceeds maximum limit of 50,000 items.");
         }
 
         for (int i = 0; i < requestList.Count; i++)
@@ -171,7 +221,7 @@ public sealed class XyoClient : IXyoClient
             httpRequest.Headers.Add("x-api-user", apiUser.Trim());
         }
 
-        ApplyDefaultHeaders(httpRequest);
+        ApplyDefaultHeaders(httpRequest, correlationId, traceparent);
 
         httpRequest.Content = JsonContent.Create(requestList, options: DefaultJsonOptions);
 
@@ -185,9 +235,31 @@ public sealed class XyoClient : IXyoClient
     }
 
     /// <inheritdoc />
-    public async Task<EnrichmentCollectionStatusResponse> GetEnrichmentStatusAsync(
+    public Task<EnrichmentCollectionStatusResponse> GetEnrichmentStatusAsync(
         string id,
         string? apiUser = null,
+        CancellationToken cancellationToken = default)
+    {
+        return GetEnrichmentStatusAsync(id, apiUser, (string?)null, null, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<EnrichmentCollectionStatusResponse> GetEnrichmentStatusAsync(
+        string id,
+        string? apiUser,
+        Guid? correlationId,
+        string? traceparent = null,
+        CancellationToken cancellationToken = default)
+    {
+        return GetEnrichmentStatusAsync(id, apiUser, correlationId?.ToString(), traceparent, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<EnrichmentCollectionStatusResponse> GetEnrichmentStatusAsync(
+        string id,
+        string? apiUser,
+        string? correlationId,
+        string? traceparent = null,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -214,7 +286,7 @@ public sealed class XyoClient : IXyoClient
             httpRequest.Headers.Add("x-api-user", apiUser.Trim());
         }
 
-        ApplyDefaultHeaders(httpRequest);
+        ApplyDefaultHeaders(httpRequest, correlationId, traceparent);
 
         using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
@@ -300,11 +372,26 @@ public sealed class XyoClient : IXyoClient
         }
     }
 
-    private void ApplyDefaultHeaders(HttpRequestMessage request)
+    private void ApplyDefaultHeaders(HttpRequestMessage request, string? correlationId = null, string? traceparent = null)
     {
-        if (!string.IsNullOrWhiteSpace(_config.CorrelationId) && !request.Headers.NonValidated.Contains("X-Correlation-ID"))
+        string? effectiveCorrelationId = !string.IsNullOrWhiteSpace(correlationId) ? correlationId : _config.CorrelationId;
+        if (!string.IsNullOrWhiteSpace(effectiveCorrelationId))
         {
-            request.Headers.TryAddWithoutValidation("X-Correlation-ID", _config.CorrelationId);
+            ValidateHeaderValue(effectiveCorrelationId, nameof(correlationId));
+            if (!request.Headers.NonValidated.Contains("X-Correlation-ID"))
+            {
+                request.Headers.TryAddWithoutValidation("X-Correlation-ID", effectiveCorrelationId);
+            }
+        }
+
+        string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : _config.Traceparent;
+        if (!string.IsNullOrWhiteSpace(effectiveTraceparent))
+        {
+            ValidateHeaderValue(effectiveTraceparent, nameof(traceparent));
+            if (!request.Headers.NonValidated.Contains("traceparent"))
+            {
+                request.Headers.TryAddWithoutValidation("traceparent", effectiveTraceparent);
+            }
         }
 
         foreach (var (key, value) in _config.DefaultHeaders)
@@ -313,6 +400,14 @@ public sealed class XyoClient : IXyoClient
             {
                 request.Headers.TryAddWithoutValidation(key, value);
             }
+        }
+    }
+
+    private static void ValidateHeaderValue(string val, string paramName)
+    {
+        if (CrlfRegex.IsMatch(val))
+        {
+            throw new XyoClientException(HttpStatusCode.BadRequest, $"Header '{paramName}' contains forbidden CRLF injection characters (CWE-113).");
         }
     }
 
@@ -366,6 +461,39 @@ public sealed class XyoClient : IXyoClient
 
         int statusCodeInt = (int)response.StatusCode;
 
+        if (statusCodeInt == 429)
+        {
+            var (retryAfter, limit, remaining, reset) = ParseRateLimitHeaders(response);
+            if (!string.IsNullOrWhiteSpace(rawPayload) && (rawPayload.TrimStart().StartsWith('{') || rawPayload.TrimStart().StartsWith('[')))
+            {
+                var probEx = XyoProblemDetailsException.FromJson(response.StatusCode, rawPayload);
+                throw new RateLimitException(
+                    response.StatusCode,
+                    probEx.Message,
+                    retryAfter: retryAfter,
+                    rateLimitLimit: limit,
+                    rateLimitRemaining: remaining,
+                    rateLimitReset: reset,
+                    type: probEx.Type,
+                    title: probEx.Title,
+                    status: probEx.Status,
+                    detail: probEx.Detail,
+                    instance: probEx.Instance,
+                    errors: probEx.Errors,
+                    rawResponseBody: rawPayload);
+            }
+
+            string msg = !string.IsNullOrWhiteSpace(rawPayload) ? rawPayload : "[HTTP 429] Rate limit exceeded. Too many requests.";
+            throw new RateLimitException(
+                response.StatusCode,
+                msg,
+                retryAfter: retryAfter,
+                rateLimitLimit: limit,
+                rateLimitRemaining: remaining,
+                rateLimitReset: reset,
+                rawResponseBody: rawPayload);
+        }
+
         if (statusCodeInt >= 500)
         {
             string msg = !string.IsNullOrWhiteSpace(rawPayload) ? rawPayload : $"[HTTP {statusCodeInt}] Upstream server error.";
@@ -384,6 +512,53 @@ public sealed class XyoClient : IXyoClient
         }
 
         throw new XyoClientException(response.StatusCode, $"[HTTP {statusCodeInt}] Unexpected HTTP response.", rawPayload);
+    }
+
+    private static (int? retryAfter, int? limit, int? remaining, int? reset) ParseRateLimitHeaders(HttpResponseMessage response)
+    {
+        int? retryAfter = ParseHeaderIntOrDelta(response, "Retry-After");
+        int? limit = ParseHeaderInt(response, "RateLimit-Limit") ?? ParseHeaderInt(response, "X-RateLimit-Limit");
+        int? remaining = ParseHeaderInt(response, "RateLimit-Remaining") ?? ParseHeaderInt(response, "X-RateLimit-Remaining");
+        int? reset = ParseHeaderInt(response, "RateLimit-Reset") ?? ParseHeaderInt(response, "X-RateLimit-Reset");
+
+        return (retryAfter, limit, remaining, reset);
+    }
+
+    private static int? ParseHeaderInt(HttpResponseMessage response, string headerName)
+    {
+        IEnumerable<string>? values = null;
+        if (response.Headers.TryGetValues(headerName, out values) ||
+            (response.Content != null && response.Content.Headers.TryGetValues(headerName, out values)))
+        {
+            string? val = values?.FirstOrDefault();
+            if (int.TryParse(val, out int result))
+            {
+                return result;
+            }
+        }
+        return null;
+    }
+
+    private static int? ParseHeaderIntOrDelta(HttpResponseMessage response, string headerName)
+    {
+        IEnumerable<string>? values = null;
+        if (response.Headers.TryGetValues(headerName, out values) ||
+            (response.Content != null && response.Content.Headers.TryGetValues(headerName, out values)))
+        {
+            string? val = values?.FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(val)) return null;
+
+            if (int.TryParse(val, out int seconds))
+            {
+                return seconds;
+            }
+            if (DateTimeOffset.TryParse(val, out var date))
+            {
+                var delta = (date - DateTimeOffset.UtcNow).TotalSeconds;
+                return delta > 0 ? (int)Math.Ceiling(delta) : 0;
+            }
+        }
+        return null;
     }
 
     private static void ValidateTransactionInput(string content, string countryCode, out string normalizedCountryCode)

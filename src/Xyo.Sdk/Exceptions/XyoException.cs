@@ -6,6 +6,26 @@ namespace Xyo.Sdk.Exceptions;
 public class XyoException : Exception
 {
     /// <summary>
+    /// Gets the recommended retry wait duration in seconds from rate limit response headers, if available.
+    /// </summary>
+    public int? RetryAfter { get; protected set; }
+
+    /// <summary>
+    /// Gets the maximum request count limit per window from RateLimit-Limit response header, if available.
+    /// </summary>
+    public int? RateLimitLimit { get; protected set; }
+
+    /// <summary>
+    /// Gets the remaining request count from RateLimit-Remaining response header, if available.
+    /// </summary>
+    public int? RateLimitRemaining { get; protected set; }
+
+    /// <summary>
+    /// Gets the rate limit reset window in seconds from RateLimit-Reset response header, if available.
+    /// </summary>
+    public int? RateLimitReset { get; protected set; }
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="XyoException"/> class.
     /// </summary>
     public XyoException()

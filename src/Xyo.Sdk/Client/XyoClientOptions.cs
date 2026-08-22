@@ -24,6 +24,11 @@ public sealed class XyoClientOptions
     public string? CorrelationId { get; set; }
 
     /// <summary>
+    /// Gets or sets the default W3C traceparent header (traceparent).
+    /// </summary>
+    public string? Traceparent { get; set; }
+
+    /// <summary>
     /// Gets or sets the HTTP request timeout duration (default 30 seconds).
     /// </summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
@@ -57,6 +62,7 @@ public sealed class XyoClientOptions
         {
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,

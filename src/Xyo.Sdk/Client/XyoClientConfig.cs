@@ -39,6 +39,11 @@ public sealed class XyoClientConfig
     public string? CorrelationId { get; init; }
 
     /// <summary>
+    /// Gets the optional W3C traceparent header attached to requests (traceparent).
+    /// </summary>
+    public string? Traceparent { get; init; }
+
+    /// <summary>
     /// Gets the HTTP request timeout duration.
     /// </summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
@@ -108,6 +113,7 @@ public sealed class XyoClientConfig
             ApiKeySupplier = supplier,
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -140,6 +146,7 @@ public sealed class XyoClientConfig
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = baseUrl.TrimEnd('/'),
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -164,6 +171,37 @@ public sealed class XyoClientConfig
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = BaseUrl,
             CorrelationId = correlationId,
+            Traceparent = Traceparent,
+            Timeout = Timeout,
+            MaxArchiveBytes = MaxArchiveBytes,
+            MaxEntryBytes = MaxEntryBytes,
+            MaxTarEntries = MaxTarEntries,
+            TrustedDownloadHosts = TrustedDownloadHosts,
+            DefaultHeaders = DefaultHeaders
+        };
+    }
+
+    /// <summary>
+    /// Attaches a distributed tracing correlation ID header (X-Correlation-ID) as a <see cref="Guid"/>.
+    /// </summary>
+    public XyoClientConfig WithCorrelationId(Guid correlationId) => WithCorrelationId(correlationId.ToString());
+
+    /// <summary>
+    /// Attaches a W3C traceparent header (traceparent).
+    /// </summary>
+    public XyoClientConfig WithTraceparent(string traceparent)
+    {
+        if (CrlfRegex.IsMatch(traceparent))
+        {
+            throw new ArgumentException("Traceparent header contains illegal CRLF injection characters.", nameof(traceparent));
+        }
+
+        return new XyoClientConfig(_apiKey)
+        {
+            ApiKeySupplier = ApiKeySupplier,
+            BaseUrl = BaseUrl,
+            CorrelationId = CorrelationId,
+            Traceparent = traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -183,6 +221,7 @@ public sealed class XyoClientConfig
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -203,6 +242,7 @@ public sealed class XyoClientConfig
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -232,6 +272,7 @@ public sealed class XyoClientConfig
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -247,7 +288,7 @@ public sealed class XyoClientConfig
     public override string ToString()
     {
         string tokenDisplay = string.IsNullOrEmpty(_apiKey) ? "(Dynamic/None)" : "[REDACTED]";
-        return $"XyoClientConfig {{ BaseUrl = '{BaseUrl}', ApiKey = '{tokenDisplay}', Timeout = {Timeout.TotalSeconds}s, CorrelationId = '{CorrelationId}' }}";
+        return $"XyoClientConfig {{ BaseUrl = '{BaseUrl}', ApiKey = '{tokenDisplay}', Timeout = {Timeout.TotalSeconds}s, CorrelationId = '{CorrelationId}', Traceparent = '{Traceparent}' }}";
     }
 
     private static string ResolveDefaultBaseUrl()

@@ -332,4 +332,82 @@ public class XyoClientTests
         Assert.True(captured.Headers.Contains("X-Custom-Tenant"));
         Assert.Equal("tenant-123", captured.Headers.GetValues("X-Custom-Tenant").First());
     }
+
+    [Fact]
+    public async Task TracingHeaders_MethodLevelOverridesAndGuid_SentCorrectly()
+    {
+        string jsonResponse = @"{ ""merchant"": ""Test"", ""description"": ""Test"", ""categories"": [], ""logo"": """", ""location"": """", ""address"": """" }";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, jsonResponse);
+        using var httpClient = new HttpClient(handler);
+        var config = new XyoClientConfig("xyo_test_token")
+            .WithCorrelationId("config-corr-id")
+            .WithTraceparent("00-configtrace-01");
+        using var client = new XyoClient(config, httpClient);
+
+        var testGuid = Guid.NewGuid();
+        string traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        await client.EnrichTransactionAsync("Uber Trip", "GB", testGuid, traceparent);
+
+        Assert.Single(handler.CapturedRequests);
+        var captured = handler.CapturedRequests[0];
+        Assert.True(captured.Headers.Contains("X-Correlation-ID"));
+        Assert.Equal(testGuid.ToString(), captured.Headers.GetValues("X-Correlation-ID").First());
+        Assert.True(captured.Headers.Contains("traceparent"));
+        Assert.Equal(traceparent, captured.Headers.GetValues("traceparent").First());
+    }
+
+    [Fact]
+    public async Task EnrichTransactionsAsync_Exceeds50kItems_ThrowsXyoClientException()
+    {
+        using var client = new XyoClient("xyo_test_token");
+        var largeBatch = new List<EnrichmentRequest>(50001);
+        var req = new EnrichmentRequest("UBER", "GB");
+        for (int i = 0; i < 50001; i++)
+        {
+            largeBatch.Add(req);
+        }
+
+        var ex = await Assert.ThrowsAsync<XyoClientException>(() => client.EnrichTransactionsAsync(largeBatch));
+        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+        Assert.Contains("exceeds maximum limit of 50,000 items", ex.Message);
+    }
+
+    [Fact]
+    public async Task Http429_RateLimitHeaders_ParsedIntoRateLimitException()
+    {
+        string jsonError = @"{ ""title"": ""Too Many Requests"", ""detail"": ""Rate limit exceeded."" }";
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            var resp = new HttpResponseMessage((HttpStatusCode)429)
+            {
+                Content = new StringContent(jsonError, System.Text.Encoding.UTF8, "application/json")
+            };
+            resp.Headers.Add("Retry-After", "30");
+            resp.Headers.Add("RateLimit-Limit", "100");
+            resp.Headers.Add("RateLimit-Remaining", "0");
+            resp.Headers.Add("RateLimit-Reset", "60");
+            return Task.FromResult(resp);
+        });
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<RateLimitException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, ex.StatusCode);
+        Assert.True(ex.IsRateLimited());
+        Assert.Equal(30, ex.RetryAfter);
+        Assert.Equal(100, ex.RateLimitLimit);
+        Assert.Equal(0, ex.RateLimitRemaining);
+        Assert.Equal(60, ex.RateLimitReset);
+        Assert.Equal("Rate limit exceeded.", ex.Message);
+
+        // Verify base XyoException properties
+        XyoException baseEx = ex;
+        Assert.Equal(30, baseEx.RetryAfter);
+        Assert.Equal(100, baseEx.RateLimitLimit);
+        Assert.Equal(0, baseEx.RateLimitRemaining);
+        Assert.Equal(60, baseEx.RateLimitReset);
+    }
 }
