@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -136,7 +137,7 @@ public sealed class XyoClient : IXyoClient
         }
 
         ValidateTransactionInput(request.Content, request.CountryCode, out string normalizedCountryCode);
-        request.CountryCode = normalizedCountryCode;
+        var effectiveRequest = new EnrichmentRequest(request.Content, normalizedCountryCode);
 
         string token = await _config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
 
@@ -146,7 +147,7 @@ public sealed class XyoClient : IXyoClient
 
         ApplyDefaultHeaders(httpRequest, correlationId, traceparent);
 
-        httpRequest.Content = JsonContent.Create(request, options: DefaultJsonOptions);
+        httpRequest.Content = JsonContent.Create(effectiveRequest, options: DefaultJsonOptions);
 
         using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
@@ -194,22 +195,23 @@ public sealed class XyoClient : IXyoClient
         var requestList = requests as IReadOnlyList<EnrichmentRequest> ?? requests.ToList();
         if (requestList.Count == 0)
         {
-            throw new XyoClientException(HttpStatusCode.BadRequest, "Transaction collection batch cannot be empty. Must contain between 1 and 50,000 items.");
+            throw new ArgumentException("Transaction collection batch cannot be empty. Must contain between 1 and 50,000 items.", nameof(requests));
         }
         if (requestList.Count > 50_000)
         {
-            throw new XyoClientException(HttpStatusCode.BadRequest, $"Transaction collection batch size of {requestList.Count} exceeds maximum limit of 50,000 items.");
+            throw new ArgumentException($"Transaction collection batch size of {requestList.Count} exceeds maximum limit of 50,000 items.", nameof(requests));
         }
 
+        var effectiveList = new List<EnrichmentRequest>(requestList.Count);
         for (int i = 0; i < requestList.Count; i++)
         {
             var item = requestList[i];
             if (item == null)
             {
-                throw new XyoClientException(HttpStatusCode.BadRequest, $"Transaction item at index {i} cannot be null.");
+                throw new ArgumentNullException(nameof(requests), $"Transaction item at index {i} cannot be null.");
             }
             ValidateTransactionInput(item.Content, item.CountryCode, out string normalized);
-            item.CountryCode = normalized;
+            effectiveList.Add(new EnrichmentRequest(item.Content, normalized));
         }
 
         ValidateApiUser(apiUser);
@@ -227,7 +229,7 @@ public sealed class XyoClient : IXyoClient
 
         ApplyDefaultHeaders(httpRequest, correlationId, traceparent);
 
-        httpRequest.Content = JsonContent.Create(requestList, options: DefaultJsonOptions);
+        httpRequest.Content = JsonContent.Create(effectiveList, options: DefaultJsonOptions);
 
         using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
@@ -269,7 +271,7 @@ public sealed class XyoClient : IXyoClient
         ThrowIfDisposed();
         if (string.IsNullOrWhiteSpace(id))
         {
-            throw new XyoClientException(HttpStatusCode.BadRequest, "Enrichment job identifier cannot be null, empty, or whitespace.");
+            throw new ArgumentException("Enrichment job identifier cannot be null, empty, or whitespace.", nameof(id));
         }
 
         ValidateApiUser(apiUser);
@@ -394,8 +396,8 @@ public sealed class XyoClient : IXyoClient
             ValidateHeaderValue(effectiveTraceparent, nameof(traceparent));
             if (!TraceparentRegex.IsMatch(effectiveTraceparent))
             {
-                throw new XyoClientException(HttpStatusCode.BadRequest,
-                    $"Header 'traceparent' does not conform to the W3C TraceContext format (version-traceid-parentid-flags).");
+                throw new ArgumentException(
+                    "Header 'traceparent' does not conform to the W3C TraceContext format (version-traceid-parentid-flags).", nameof(traceparent));
             }
             if (!request.Headers.NonValidated.Contains("traceparent"))
             {
@@ -416,7 +418,7 @@ public sealed class XyoClient : IXyoClient
     {
         if (CrlfRegex.IsMatch(val))
         {
-            throw new XyoClientException(HttpStatusCode.BadRequest, $"Header '{paramName}' contains forbidden CRLF injection characters (CWE-113).");
+            throw new ArgumentException($"Header '{paramName}' contains forbidden CRLF injection characters (CWE-113).", paramName);
         }
     }
 
@@ -458,9 +460,16 @@ public sealed class XyoClient : IXyoClient
                 using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
                 using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: false);
                 const int maxChars = 32768;
-                char[] charBuffer = new char[maxChars];
-                int totalCharsRead = await reader.ReadBlockAsync(charBuffer.AsMemory(0, maxChars), cancellationToken).ConfigureAwait(false);
-                rawPayload = new string(charBuffer, 0, totalCharsRead);
+                char[] charBuffer = ArrayPool<char>.Shared.Rent(maxChars);
+                try
+                {
+                    int totalCharsRead = await reader.ReadBlockAsync(charBuffer.AsMemory(0, maxChars), cancellationToken).ConfigureAwait(false);
+                    rawPayload = new string(charBuffer, 0, totalCharsRead);
+                }
+                finally
+                {
+                    ArrayPool<char>.Shared.Return(charBuffer);
+                }
             }
             catch
             {
@@ -577,23 +586,23 @@ public sealed class XyoClient : IXyoClient
     {
         if (string.IsNullOrWhiteSpace(content))
         {
-            throw new XyoClientException(HttpStatusCode.BadRequest, "Transaction content cannot be null, empty, or whitespace.");
+            throw new ArgumentException("Transaction content cannot be null, empty, or whitespace.", nameof(content));
         }
 
         if (content.Length > 128)
         {
-            throw new XyoClientException(HttpStatusCode.BadRequest, $"Transaction content exceeds maximum length of 128 characters (provided {content.Length} chars).");
+            throw new ArgumentException($"Transaction content exceeds maximum length of 128 characters (provided {content.Length} chars).", nameof(content));
         }
 
         if (string.IsNullOrWhiteSpace(countryCode))
         {
-            throw new XyoClientException(HttpStatusCode.BadRequest, "Country code cannot be null, empty, or whitespace.");
+            throw new ArgumentException("Country code cannot be null, empty, or whitespace.", nameof(countryCode));
         }
 
         string trimmed = countryCode.Trim();
         if (!CountryCodeRegex.IsMatch(trimmed))
         {
-            throw new XyoClientException(HttpStatusCode.BadRequest, $"Invalid country code '{countryCode}'. Must be a 2-letter ISO 3166-1 alpha-2 country code.");
+            throw new ArgumentException($"Invalid country code '{countryCode}'. Must be a 2-letter ISO 3166-1 alpha-2 country code.", nameof(countryCode));
         }
 
         normalizedCountryCode = trimmed.ToUpperInvariant();
@@ -608,7 +617,7 @@ public sealed class XyoClient : IXyoClient
 
         if (CrlfRegex.IsMatch(apiUser))
         {
-            throw new XyoClientException(HttpStatusCode.BadRequest, "Tenant user identifier contains forbidden CRLF injection characters (CWE-113).");
+            throw new ArgumentException("Tenant user identifier contains forbidden CRLF injection characters (CWE-113).", nameof(apiUser));
         }
     }
 

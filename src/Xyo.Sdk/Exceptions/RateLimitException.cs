@@ -15,6 +15,11 @@ public sealed class RateLimitException : XyoProblemDetailsException
     public int? RetryAfter { get; }
 
     /// <summary>
+    /// Gets the recommended retry wait duration as a <see cref="TimeSpan"/>, if available.
+    /// </summary>
+    public TimeSpan? RetryAfterDelay => RetryAfter.HasValue ? TimeSpan.FromSeconds(RetryAfter.Value) : null;
+
+    /// <summary>
     /// Gets the maximum request count limit per window from the RateLimit-Limit response header, if available.
     /// </summary>
     public int? RateLimitLimit { get; }

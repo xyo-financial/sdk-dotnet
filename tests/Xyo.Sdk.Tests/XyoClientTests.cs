@@ -46,23 +46,21 @@ public class XyoClientTests
     }
 
     [Fact]
-    public async Task EnrichTransactionAsync_EmptyContent_ThrowsXyoClientException()
+    public async Task EnrichTransactionAsync_EmptyContent_ThrowsArgumentException()
     {
         using var client = new XyoClient("xyo_test_token_123");
 
-        var ex = await Assert.ThrowsAsync<XyoClientException>(() => client.EnrichTransactionAsync("", "GB"));
-        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => client.EnrichTransactionAsync("", "GB"));
         Assert.Contains("cannot be null, empty", ex.Message);
     }
 
     [Fact]
-    public async Task EnrichTransactionAsync_ContentExceeding128Chars_ThrowsXyoClientException()
+    public async Task EnrichTransactionAsync_ContentExceeding128Chars_ThrowsArgumentException()
     {
         using var client = new XyoClient("xyo_test_token_123");
         string longContent = new string('A', 129);
 
-        var ex = await Assert.ThrowsAsync<XyoClientException>(() => client.EnrichTransactionAsync(longContent, "GB"));
-        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => client.EnrichTransactionAsync(longContent, "GB"));
         Assert.Contains("exceeds maximum length of 128", ex.Message);
     }
 
@@ -71,12 +69,11 @@ public class XyoClientTests
     [InlineData("GBR")]
     [InlineData("12")]
     [InlineData("G-")]
-    public async Task EnrichTransactionAsync_InvalidCountryCode_ThrowsXyoClientException(string invalidCountryCode)
+    public async Task EnrichTransactionAsync_InvalidCountryCode_ThrowsArgumentException(string invalidCountryCode)
     {
         using var client = new XyoClient("xyo_test_token_123");
 
-        var ex = await Assert.ThrowsAsync<XyoClientException>(() => client.EnrichTransactionAsync("Valid Content", invalidCountryCode));
-        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => client.EnrichTransactionAsync("Valid Content", invalidCountryCode));
         Assert.Contains("Must be a 2-letter ISO 3166-1 alpha-2", ex.Message);
     }
 
@@ -139,37 +136,34 @@ public class XyoClientTests
     }
 
     [Fact]
-    public async Task EnrichTransactionsAsync_EmptyBatch_ThrowsXyoClientException()
+    public async Task EnrichTransactionsAsync_EmptyBatch_ThrowsArgumentException()
     {
         using var client = new XyoClient("xyo_test_token_123");
 
-        var ex = await Assert.ThrowsAsync<XyoClientException>(() => client.EnrichTransactionsAsync(new List<EnrichmentRequest>()));
-        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => client.EnrichTransactionsAsync(new List<EnrichmentRequest>()));
         Assert.Contains("cannot be empty", ex.Message);
     }
 
     [Fact]
-    public async Task EnrichTransactionsAsync_CrlfInApiUser_ThrowsXyoClientException()
+    public async Task EnrichTransactionsAsync_CrlfInApiUser_ThrowsArgumentException()
     {
         using var client = new XyoClient("xyo_test_token_123");
         var batch = new List<EnrichmentRequest> { new("COSTA", "GB") };
 
-        var ex = await Assert.ThrowsAsync<XyoClientException>(() => client.EnrichTransactionsAsync(batch, apiUser: "user\r\nInjected-Header: evil"));
-        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => client.EnrichTransactionsAsync(batch, apiUser: "user\r\nInjected-Header: evil"));
         Assert.Contains("forbidden CRLF injection", ex.Message);
     }
 
     [Fact]
-    public async Task EnrichTransactionAsync_CrlfInTraceparent_ThrowsXyoClientException()
+    public async Task EnrichTransactionAsync_CrlfInTraceparent_ThrowsArgumentException()
     {
         var jsonResponse = @"{ ""merchant"": ""Test"", ""description"": ""Test"", ""categories"": [], ""logo"": """", ""location"": """", ""address"": """" }";
         var handler = new MockHttpMessageHandler(HttpStatusCode.OK, jsonResponse);
         using var httpClient = new HttpClient(handler);
         using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
 
-        var ex = await Assert.ThrowsAsync<XyoClientException>(() =>
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
             client.EnrichTransactionAsync("Uber Trip", "GB", (string?)null, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\nInjected: evil"));
-        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
         Assert.Contains("forbidden CRLF injection", ex.Message);
     }
 
@@ -413,7 +407,7 @@ public class XyoClientTests
     }
 
     [Fact]
-    public async Task EnrichTransactionsAsync_Exceeds50kItems_ThrowsXyoClientException()
+    public async Task EnrichTransactionsAsync_Exceeds50kItems_ThrowsArgumentException()
     {
         using var client = new XyoClient("xyo_test_token");
         var largeBatch = new List<EnrichmentRequest>(50001);
@@ -423,8 +417,7 @@ public class XyoClientTests
             largeBatch.Add(req);
         }
 
-        var ex = await Assert.ThrowsAsync<XyoClientException>(() => client.EnrichTransactionsAsync(largeBatch));
-        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => client.EnrichTransactionsAsync(largeBatch));
         Assert.Contains("exceeds maximum limit of 50,000 items", ex.Message);
     }
 
@@ -453,6 +446,7 @@ public class XyoClientTests
         Assert.Equal(HttpStatusCode.TooManyRequests, ex.StatusCode);
         Assert.True(ex.IsRateLimited());
         Assert.Equal(30, ex.RetryAfter);
+        Assert.Equal(TimeSpan.FromSeconds(30), ex.RetryAfterDelay);
         Assert.Equal(100, ex.RateLimitLimit);
         Assert.Equal(0, ex.RateLimitRemaining);
         Assert.Equal(60, ex.RateLimitReset);
@@ -481,5 +475,48 @@ public class XyoClientTests
         var ex = await Assert.ThrowsAsync<RateLimitException>(() => client.EnrichTransactionAsync("Uber", "GB"));
         Assert.NotNull(ex.RetryAfter);
         Assert.True(ex.RetryAfter > 0);
+        Assert.NotNull(ex.RetryAfterDelay);
+        Assert.True(ex.RetryAfterDelay > TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void XyoClientConfig_WithDefaultHeader_CrlfInKeyOrValue_ThrowsArgumentException()
+    {
+        var config = new XyoClientConfig("xyo_test_token");
+        var ex1 = Assert.Throws<ArgumentException>(() => config.WithDefaultHeader("X-Header\r\nInjected: evil", "value"));
+        Assert.Contains("forbidden CRLF injection", ex1.Message);
+
+        var ex2 = Assert.Throws<ArgumentException>(() => config.WithDefaultHeader("X-Header", "value\r\nInjected: evil"));
+        Assert.Contains("forbidden CRLF injection", ex2.Message);
+    }
+
+    [Fact]
+    public async Task EnrichTransactionAsync_CallerProvidedRequest_DoesNotMutateCountryCodeInPlace()
+    {
+        string jsonResponse = @"{ ""merchant"": ""Costa Coffee"", ""description"": ""Desc"", ""categories"": [], ""logo"": """", ""location"": """", ""address"": """" }";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, jsonResponse);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token_123"), httpClient);
+
+        var request = new EnrichmentRequest("COSTA COFFEE", "gb");
+        await client.EnrichTransactionAsync(request);
+
+        Assert.Equal("gb", request.CountryCode);
+    }
+
+    [Fact]
+    public async Task EnrichTransactionsAsync_CallerProvidedRequests_DoesNotMutateCountryCodeInPlace()
+    {
+        string jsonResponse = @"{ ""id"": ""job_123"", ""link"": ""https://download.xyo.financial/batches/123.tar.gz"" }";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, jsonResponse);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token_123"), httpClient);
+
+        var item = new EnrichmentRequest("COSTA COFFEE", "gb");
+        var batch = new List<EnrichmentRequest> { item };
+
+        await client.EnrichTransactionsAsync(batch);
+
+        Assert.Equal("gb", item.CountryCode);
     }
 }

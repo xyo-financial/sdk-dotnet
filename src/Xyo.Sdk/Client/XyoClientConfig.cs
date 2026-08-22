@@ -279,6 +279,11 @@ public sealed class XyoClientConfig
             throw new ArgumentException("Header key cannot be null or empty.", nameof(key));
         }
 
+        if (CrlfRegex.IsMatch(key) || CrlfRegex.IsMatch(value))
+        {
+            throw new ArgumentException("Header contains forbidden CRLF injection characters.");
+        }
+
         var headers = new Dictionary<string, string>(DefaultHeaders, StringComparer.OrdinalIgnoreCase)
         {
             [key] = value
