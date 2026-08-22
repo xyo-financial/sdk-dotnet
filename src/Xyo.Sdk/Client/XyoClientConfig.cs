@@ -14,9 +14,13 @@ public sealed class XyoClientConfig
 {
     private const string DefaultProductionUrl = "https://api.xyo.financial";
     private static readonly Regex CrlfRegex = new(@"[\r\n]", RegexOptions.Compiled);
+    private static readonly Regex TraceparentRegex = new(
+        @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string? _apiKey;
+    private string? _traceparent;
 
     /// <summary>
     /// Gets the static API token.
@@ -37,6 +41,20 @@ public sealed class XyoClientConfig
     /// Gets the optional distributed tracing correlation identifier attached to requests (X-Correlation-ID).
     /// </summary>
     public string? CorrelationId { get; init; }
+
+    /// <summary>
+    /// Gets the optional W3C traceparent header attached to requests (traceparent).
+    /// </summary>
+    public string? Traceparent
+    {
+        get => _traceparent;
+        init
+        {
+            if (value != null && CrlfRegex.IsMatch(value))
+                throw new ArgumentException("Traceparent header contains illegal CRLF injection characters.", nameof(value));
+            _traceparent = value;
+        }
+    }
 
     /// <summary>
     /// Gets the HTTP request timeout duration.
@@ -108,6 +126,7 @@ public sealed class XyoClientConfig
             ApiKeySupplier = supplier,
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -140,6 +159,7 @@ public sealed class XyoClientConfig
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = baseUrl.TrimEnd('/'),
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -164,6 +184,41 @@ public sealed class XyoClientConfig
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = BaseUrl,
             CorrelationId = correlationId,
+            Traceparent = Traceparent,
+            Timeout = Timeout,
+            MaxArchiveBytes = MaxArchiveBytes,
+            MaxEntryBytes = MaxEntryBytes,
+            MaxTarEntries = MaxTarEntries,
+            TrustedDownloadHosts = TrustedDownloadHosts,
+            DefaultHeaders = DefaultHeaders
+        };
+    }
+
+    /// <summary>
+    /// Attaches a distributed tracing correlation ID header (X-Correlation-ID) as a <see cref="Guid"/>.
+    /// </summary>
+    public XyoClientConfig WithCorrelationId(Guid correlationId) => WithCorrelationId(correlationId.ToString());
+
+    /// <summary>
+    /// Attaches a W3C traceparent header (traceparent).
+    /// </summary>
+    public XyoClientConfig WithTraceparent(string traceparent)
+    {
+        if (CrlfRegex.IsMatch(traceparent))
+        {
+            throw new ArgumentException("Traceparent header contains illegal CRLF injection characters.", nameof(traceparent));
+        }
+        if (!TraceparentRegex.IsMatch(traceparent))
+        {
+            throw new ArgumentException("Traceparent header does not conform to the W3C TraceContext format (version-traceid-parentid-flags).", nameof(traceparent));
+        }
+
+        return new XyoClientConfig(_apiKey)
+        {
+            ApiKeySupplier = ApiKeySupplier,
+            BaseUrl = BaseUrl,
+            CorrelationId = CorrelationId,
+            Traceparent = traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -183,6 +238,7 @@ public sealed class XyoClientConfig
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -203,6 +259,7 @@ public sealed class XyoClientConfig
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -222,6 +279,11 @@ public sealed class XyoClientConfig
             throw new ArgumentException("Header key cannot be null or empty.", nameof(key));
         }
 
+        if (CrlfRegex.IsMatch(key) || CrlfRegex.IsMatch(value))
+        {
+            throw new ArgumentException("Header contains forbidden CRLF injection characters.");
+        }
+
         var headers = new Dictionary<string, string>(DefaultHeaders, StringComparer.OrdinalIgnoreCase)
         {
             [key] = value
@@ -232,6 +294,7 @@ public sealed class XyoClientConfig
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
+            Traceparent = Traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxEntryBytes = MaxEntryBytes,
@@ -247,7 +310,7 @@ public sealed class XyoClientConfig
     public override string ToString()
     {
         string tokenDisplay = string.IsNullOrEmpty(_apiKey) ? "(Dynamic/None)" : "[REDACTED]";
-        return $"XyoClientConfig {{ BaseUrl = '{BaseUrl}', ApiKey = '{tokenDisplay}', Timeout = {Timeout.TotalSeconds}s, CorrelationId = '{CorrelationId}' }}";
+        return $"XyoClientConfig {{ BaseUrl = '{BaseUrl}', ApiKey = '{tokenDisplay}', Timeout = {Timeout.TotalSeconds}s, CorrelationId = '{CorrelationId}', Traceparent = '{Traceparent}' }}";
     }
 
     private static string ResolveDefaultBaseUrl()

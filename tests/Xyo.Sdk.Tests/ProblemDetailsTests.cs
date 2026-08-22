@@ -63,7 +63,7 @@ public class ProblemDetailsTests
         using var httpClient = new HttpClient(handler);
         using var client = new XyoClient(new XyoClientConfig("xyo_token"), httpClient);
 
-        var ex = await Assert.ThrowsAsync<XyoProblemDetailsException>(() => client.EnrichTransactionAsync("COSTA", "GB"));
+        var ex = await Assert.ThrowsAsync<RateLimitException>(() => client.EnrichTransactionAsync("COSTA", "GB"));
 
         Assert.Equal((HttpStatusCode)429, ex.StatusCode);
         Assert.True(ex.IsRateLimited());
