@@ -4,7 +4,7 @@
     <TargetFrameworks>net8.0</TargetFrameworks>
     <AssemblyName>Xyo.Sdk</AssemblyName>
     <PackageId>Xyo.Sdk</PackageId>
-    <Version>2.0.2</Version>
+    <Version>2.1.0</Version>
     <Authors>Syniol Limited</Authors>
     <Company>Syniol Limited</Company>
     <Description>Official, institutional-grade .NET Client SDK for XYO Financial transaction enrichment API.</Description>

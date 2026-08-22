@@ -51,7 +51,7 @@ Install-Package Xyo.Sdk
 
 ### PackageReference
 ```xml
-<PackageReference Include="Xyo.Sdk" Version="2.0.2" />
+<PackageReference Include="Xyo.Sdk" Version="2.1.0" />
 ```
 
 ---
