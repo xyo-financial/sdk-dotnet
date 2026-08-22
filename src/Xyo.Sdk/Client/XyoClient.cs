@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -187,7 +188,7 @@ public sealed class XyoClient : IXyoClient
             throw new ArgumentNullException(nameof(requests));
         }
 
-        var requestList = requests.ToList();
+        var requestList = requests as IReadOnlyList<EnrichmentRequest> ?? requests.ToList();
         if (requestList.Count == 0)
         {
             throw new XyoClientException(HttpStatusCode.BadRequest, "Transaction collection batch cannot be empty. Must contain between 1 and 50,000 items.");
@@ -464,7 +465,7 @@ public sealed class XyoClient : IXyoClient
         if (statusCodeInt == 429)
         {
             var (retryAfter, limit, remaining, reset) = ParseRateLimitHeaders(response);
-            if (!string.IsNullOrWhiteSpace(rawPayload) && (rawPayload.TrimStart().StartsWith('{') || rawPayload.TrimStart().StartsWith('[')))
+            if (!string.IsNullOrWhiteSpace(rawPayload) && response.Content?.Headers?.ContentType?.MediaType?.Contains("json") == true)
             {
                 var probEx = XyoProblemDetailsException.FromJson(response.StatusCode, rawPayload);
                 throw new RateLimitException(
@@ -502,7 +503,7 @@ public sealed class XyoClient : IXyoClient
 
         if (statusCodeInt >= 400)
         {
-            if (!string.IsNullOrWhiteSpace(rawPayload) && (rawPayload.TrimStart().StartsWith('{') || rawPayload.TrimStart().StartsWith('[')))
+            if (!string.IsNullOrWhiteSpace(rawPayload) && response.Content?.Headers?.ContentType?.MediaType?.Contains("json") == true)
             {
                 throw XyoProblemDetailsException.FromJson(response.StatusCode, rawPayload);
             }
@@ -552,7 +553,7 @@ public sealed class XyoClient : IXyoClient
             {
                 return seconds;
             }
-            if (DateTimeOffset.TryParse(val, out var date))
+            if (DateTimeOffset.TryParse(val, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
             {
                 var delta = (date - DateTimeOffset.UtcNow).TotalSeconds;
                 return delta > 0 ? (int)Math.Ceiling(delta) : 0;

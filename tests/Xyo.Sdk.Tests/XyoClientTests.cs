@@ -114,6 +114,31 @@ public class XyoClientTests
     }
 
     [Fact]
+    public async Task EnrichTransactionsAsync_ArrayBatchInput_SubmitsSuccessfully()
+    {
+        string jsonResponse = @"
+        {
+            ""id"": ""batch_job_112233"",
+            ""link"": ""https://download.xyo.financial/batches/112233.tar.gz""
+        }";
+
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, jsonResponse);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token_123"), httpClient);
+
+        EnrichmentRequest[] batchArray = new EnrichmentRequest[]
+        {
+            new("UBER TRIP 123", "gb"),
+            new("STARBUCKS #405", "us")
+        };
+
+        var result = await client.EnrichTransactionsAsync(batchArray);
+
+        Assert.NotNull(result);
+        Assert.Equal("batch_job_112233", result.Id);
+    }
+
+    [Fact]
     public async Task EnrichTransactionsAsync_EmptyBatch_ThrowsXyoClientException()
     {
         using var client = new XyoClient("xyo_test_token_123");
@@ -409,5 +434,29 @@ public class XyoClientTests
         Assert.Equal(100, baseEx.RateLimitLimit);
         Assert.Equal(0, baseEx.RateLimitRemaining);
         Assert.Equal(60, baseEx.RateLimitReset);
+    }
+
+    [Fact]
+    public async Task Http429_RetryAfterAsHttpDate_ParsedSuccessfully()
+    {
+        string jsonError = @"{ ""title"": ""Too Many Requests"", ""detail"": ""Rate limit exceeded."" }";
+        string futureDate = DateTimeOffset.UtcNow.AddSeconds(120).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            var resp = new HttpResponseMessage((HttpStatusCode)429)
+            {
+                Content = new StringContent(jsonError, System.Text.Encoding.UTF8, "application/json")
+            };
+            resp.Headers.Add("Retry-After", futureDate);
+            return Task.FromResult(resp);
+        });
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<RateLimitException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+        Assert.NotNull(ex.RetryAfter);
+        Assert.True(ex.RetryAfter > 0);
     }
 }
