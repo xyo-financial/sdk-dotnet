@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
 
     steps:
       - name: Checkout SDK repository
@@ -42,12 +43,13 @@ jobs:
           npx -y @openapitools/openapi-generator-cli generate \
             -i specs/openapi.yml \
             -g csharp \
-            -o src/Xyo.Generated \
+            -o /tmp/csharp-gen \
             --additional-properties=packageName=Xyo.Generated,targetFramework=net8.0,nullableReferenceTypes=true,netCoreProjectFile=true,library=generichost \
             --global-property apiTests=false,modelTests=false,apiDocs=false,modelDocs=false
 
-          # Clean up specs checkout
-          rm -rf specs
+          # Sync generated files into src/Xyo.Generated
+          cp -r /tmp/csharp-gen/src/Xyo.Generated/* src/Xyo.Generated/
+          rm -rf /tmp/csharp-gen specs
 
       - name: Build and Test Solution
         run: |
@@ -55,8 +57,12 @@ jobs:
           dotnet build Xyo.Sdk.sln -c Release --no-restore
           dotnet test Xyo.Sdk.sln -c Release --no-build
 
-      - name: Commit regenerated client
-        uses: stefanzweifel/git-auto-commit-action@v5
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
         with:
-          commit_message: "chore: regenerate OpenAPI client from spec ${{ github.event.client_payload.tag || inputs.spec_tag || 'latest' }}"
-          file_pattern: "src/Xyo.Generated/**"
+          token: ${{ secrets.SDK_DISPATCH_TOKEN || secrets.GITHUB_TOKEN }}
+          commit-message: "chore: regenerate OpenAPI client from spec ${{ github.event.client_payload.tag || inputs.spec_tag || 'latest' }}"
+          title: "Automated SDK Update"
+          body: "This PR automatically updates the generated .NET client based on OpenAPI spec ${{ github.event.client_payload.tag || inputs.spec_tag || 'latest' }}."
+          branch: "chore/auto-update-sdk"
+          delete-branch: true
