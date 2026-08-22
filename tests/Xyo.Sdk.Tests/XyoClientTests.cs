@@ -160,6 +160,36 @@ public class XyoClientTests
     }
 
     [Fact]
+    public async Task EnrichTransactionAsync_CrlfInTraceparent_ThrowsXyoClientException()
+    {
+        var jsonResponse = @"{ ""merchant"": ""Test"", ""description"": ""Test"", ""categories"": [], ""logo"": """", ""location"": """", ""address"": """" }";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, jsonResponse);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoClientException>(() =>
+            client.EnrichTransactionAsync("Uber Trip", "GB", (string?)null, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\nInjected: evil"));
+        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+        Assert.Contains("forbidden CRLF injection", ex.Message);
+    }
+
+    [Fact]
+    public void XyoClientConfig_CrlfInTraceparentInitSetter_ThrowsArgumentException()
+    {
+        var ex = Assert.Throws<ArgumentException>(() =>
+            new XyoClientConfig("xyo_test_token") { Traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\nInjected: evil" });
+        Assert.Contains("CRLF injection", ex.Message);
+    }
+
+    [Fact]
+    public void XyoClientConfig_WithTraceparent_MalformedFormat_ThrowsArgumentException()
+    {
+        var ex = Assert.Throws<ArgumentException>(() =>
+            new XyoClientConfig("xyo_test_token").WithTraceparent("not-a-valid-traceparent"));
+        Assert.Contains("W3C TraceContext", ex.Message);
+    }
+
+    [Fact]
     public async Task GetEnrichmentStatusAsync_ValidId_ReturnsStatus()
     {
         string jsonResponse = @"{ ""status"": ""READY"" }";
@@ -366,7 +396,7 @@ public class XyoClientTests
         using var httpClient = new HttpClient(handler);
         var config = new XyoClientConfig("xyo_test_token")
             .WithCorrelationId("config-corr-id")
-            .WithTraceparent("00-configtrace-01");
+            .WithTraceparent("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00");
         using var client = new XyoClient(config, httpClient);
 
         var testGuid = Guid.NewGuid();
@@ -427,13 +457,6 @@ public class XyoClientTests
         Assert.Equal(0, ex.RateLimitRemaining);
         Assert.Equal(60, ex.RateLimitReset);
         Assert.Equal("Rate limit exceeded.", ex.Message);
-
-        // Verify base XyoException properties
-        XyoException baseEx = ex;
-        Assert.Equal(30, baseEx.RetryAfter);
-        Assert.Equal(100, baseEx.RateLimitLimit);
-        Assert.Equal(0, baseEx.RateLimitRemaining);
-        Assert.Equal(60, baseEx.RateLimitReset);
     }
 
     [Fact]

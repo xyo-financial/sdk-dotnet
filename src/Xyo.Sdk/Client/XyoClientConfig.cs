@@ -14,9 +14,13 @@ public sealed class XyoClientConfig
 {
     private const string DefaultProductionUrl = "https://api.xyo.financial";
     private static readonly Regex CrlfRegex = new(@"[\r\n]", RegexOptions.Compiled);
+    private static readonly Regex TraceparentRegex = new(
+        @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string? _apiKey;
+    private string? _traceparent;
 
     /// <summary>
     /// Gets the static API token.
@@ -41,7 +45,16 @@ public sealed class XyoClientConfig
     /// <summary>
     /// Gets the optional W3C traceparent header attached to requests (traceparent).
     /// </summary>
-    public string? Traceparent { get; init; }
+    public string? Traceparent
+    {
+        get => _traceparent;
+        init
+        {
+            if (value != null && CrlfRegex.IsMatch(value))
+                throw new ArgumentException("Traceparent header contains illegal CRLF injection characters.", nameof(value));
+            _traceparent = value;
+        }
+    }
 
     /// <summary>
     /// Gets the HTTP request timeout duration.
@@ -194,6 +207,10 @@ public sealed class XyoClientConfig
         if (CrlfRegex.IsMatch(traceparent))
         {
             throw new ArgumentException("Traceparent header contains illegal CRLF injection characters.", nameof(traceparent));
+        }
+        if (!TraceparentRegex.IsMatch(traceparent))
+        {
+            throw new ArgumentException("Traceparent header does not conform to the W3C TraceContext format (version-traceid-parentid-flags).", nameof(traceparent));
         }
 
         return new XyoClientConfig(_apiKey)

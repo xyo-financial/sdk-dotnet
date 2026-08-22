@@ -27,6 +27,9 @@ public sealed class XyoClient : IXyoClient
 {
     private static readonly Regex CrlfRegex = new(@"[\r\n]", RegexOptions.Compiled);
     private static readonly Regex CountryCodeRegex = new(@"^[A-Za-z]{2}$", RegexOptions.Compiled);
+    private static readonly Regex TraceparentRegex = new(
+        @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly System.Text.Json.JsonSerializerOptions DefaultJsonOptions = CreateJsonSerializerOptions();
 
@@ -100,7 +103,7 @@ public sealed class XyoClient : IXyoClient
     /// <inheritdoc />
     public Task<EnrichmentResponse> EnrichTransactionAsync(string content, string countryCode, Guid? correlationId, string? traceparent = null, CancellationToken cancellationToken = default)
     {
-        return EnrichTransactionAsync(content, countryCode, correlationId?.ToString(), traceparent, cancellationToken);
+        return EnrichTransactionAsync(content, countryCode, correlationId?.ToString("D"), traceparent, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -120,7 +123,7 @@ public sealed class XyoClient : IXyoClient
     /// <inheritdoc />
     public Task<EnrichmentResponse> EnrichTransactionAsync(EnrichmentRequest request, Guid? correlationId, string? traceparent = null, CancellationToken cancellationToken = default)
     {
-        return EnrichTransactionAsync(request, correlationId?.ToString(), traceparent, cancellationToken);
+        return EnrichTransactionAsync(request, correlationId?.ToString("D"), traceparent, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -171,7 +174,7 @@ public sealed class XyoClient : IXyoClient
         string? traceparent = null,
         CancellationToken cancellationToken = default)
     {
-        return EnrichTransactionsAsync(requests, apiUser, correlationId?.ToString(), traceparent, cancellationToken);
+        return EnrichTransactionsAsync(requests, apiUser, correlationId?.ToString("D"), traceparent, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -252,7 +255,7 @@ public sealed class XyoClient : IXyoClient
         string? traceparent = null,
         CancellationToken cancellationToken = default)
     {
-        return GetEnrichmentStatusAsync(id, apiUser, correlationId?.ToString(), traceparent, cancellationToken);
+        return GetEnrichmentStatusAsync(id, apiUser, correlationId?.ToString("D"), traceparent, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -389,6 +392,11 @@ public sealed class XyoClient : IXyoClient
         if (!string.IsNullOrWhiteSpace(effectiveTraceparent))
         {
             ValidateHeaderValue(effectiveTraceparent, nameof(traceparent));
+            if (!TraceparentRegex.IsMatch(effectiveTraceparent))
+            {
+                throw new XyoClientException(HttpStatusCode.BadRequest,
+                    $"Header 'traceparent' does not conform to the W3C TraceContext format (version-traceid-parentid-flags).");
+            }
             if (!request.Headers.NonValidated.Contains("traceparent"))
             {
                 request.Headers.TryAddWithoutValidation("traceparent", effectiveTraceparent);
@@ -555,6 +563,9 @@ public sealed class XyoClient : IXyoClient
             }
             if (DateTimeOffset.TryParse(val, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
             {
+                // Known limitation: UtcNow is captured at parse time, not at the moment the caller
+                // acts on the result, so the returned delta may be slightly larger than the actual
+                // remaining wait time (positive drift).
                 var delta = (date - DateTimeOffset.UtcNow).TotalSeconds;
                 return delta > 0 ? (int)Math.Ceiling(delta) : 0;
             }

@@ -7,8 +7,28 @@ namespace Xyo.Sdk.Exceptions;
 /// <summary>
 /// Exception thrown when the API server returns an HTTP 429 Too Many Requests status code.
 /// </summary>
-public class RateLimitException : XyoProblemDetailsException
+public sealed class RateLimitException : XyoProblemDetailsException
 {
+    /// <summary>
+    /// Gets the recommended retry wait duration in seconds from the Retry-After response header, if available.
+    /// </summary>
+    public int? RetryAfter { get; }
+
+    /// <summary>
+    /// Gets the maximum request count limit per window from the RateLimit-Limit response header, if available.
+    /// </summary>
+    public int? RateLimitLimit { get; }
+
+    /// <summary>
+    /// Gets the remaining request count from the RateLimit-Remaining response header, if available.
+    /// </summary>
+    public int? RateLimitRemaining { get; }
+
+    /// <summary>
+    /// Gets the rate limit reset window in seconds from the RateLimit-Reset response header, if available.
+    /// </summary>
+    public int? RateLimitReset { get; }
+
     /// <summary>
     /// Initializes a new instance of the <see cref="RateLimitException"/> class.
     /// </summary>
