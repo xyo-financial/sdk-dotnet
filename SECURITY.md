@@ -2,12 +2,12 @@
 
 ## 📋 Supported SDK Versions
 
-Only the `2.0.0` release of the XYO .NET SDK receives active security updates and patches.
+Only the `2.1.0` release of the XYO .NET SDK receives active security updates and patches.
 
 | Version | Supported | Status |
 | ------- | --------- | ------ |
-| 2.0.0   | :white_check_mark: | Active GA |
-| < 2.0.0 | :x: | End of Life (Unsupported) |
+| 2.1.x   | :white_check_mark: | Active GA |
+| < 2.1.0 | :x: | End of Life (Unsupported) |
 
 ---
 
