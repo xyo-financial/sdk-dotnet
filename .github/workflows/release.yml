@@ -123,3 +123,11 @@ jobs:
 
       - name: Run Example Application
         run: dotnet run --project example/Example.csproj
+
+      - name: Dispatch SDK version update
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.SDK_DISPATCH_TOKEN }}
+          repository: xyo-financial/xyo-financial
+          event-type: sdk-version-updated
+          client-payload: '{"sdk": "dotnet", "version": "${{ github.ref_name }}"}'
