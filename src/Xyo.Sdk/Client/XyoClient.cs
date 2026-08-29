@@ -221,7 +221,10 @@ public sealed class XyoClient : IXyoClient
             throw new ArgumentException($"Transaction collection batch size of {requestList.Count} exceeds maximum limit of 50,000 items.", nameof(requests));
         }
 
-        var effectiveList = new List<EnrichmentRequest>(requestList.Count);
+        // Only materializes a copy on the first divergence between the input and its normalized form (e.g.
+        // a lowercase country code). For the common case where every item is already normalized, this avoids
+        // doubling peak managed heap with a second List plus up to 50,000 fresh EnrichmentRequest instances.
+        List<EnrichmentRequest>? effectiveList = null;
         for (int i = 0; i < requestList.Count; i++)
         {
             var item = requestList[i];
@@ -230,8 +233,13 @@ public sealed class XyoClient : IXyoClient
                 throw new ArgumentNullException(nameof(requests), $"Transaction item at index {i} cannot be null.");
             }
             ValidateTransactionInput(item.Content, item.CountryCode, out string normalized);
-            effectiveList.Add(new EnrichmentRequest(item.Content, normalized));
+            if (!ReferenceEquals(normalized, item.CountryCode))
+            {
+                effectiveList ??= new List<EnrichmentRequest>(requestList);
+                effectiveList[i] = new EnrichmentRequest(item.Content, normalized);
+            }
         }
+        IReadOnlyList<EnrichmentRequest> effective = effectiveList ?? requestList;
 
         ValidateApiUser(apiUser);
 
@@ -248,7 +256,7 @@ public sealed class XyoClient : IXyoClient
 
         ApplyDefaultHeaders(httpRequest, correlationId, traceparent);
 
-        httpRequest.Content = JsonContent.Create(effectiveList, options: DefaultJsonOptions);
+        httpRequest.Content = JsonContent.Create(effective, options: DefaultJsonOptions);
 
         using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
