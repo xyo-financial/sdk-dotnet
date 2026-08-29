@@ -65,7 +65,7 @@ public sealed class XyoClient : IXyoClient
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
     private readonly DownloadSecurityPolicy _securityPolicy;
-    private bool _disposed;
+    private int _disposed; // 0 = not disposed, 1 = disposed; mutated only via Interlocked, see Dispose()
 
     /// <summary>
     /// Initializes a new instance of the <see cref="XyoClient"/> class with an API key.
@@ -742,10 +742,7 @@ public sealed class XyoClient : IXyoClient
 
     private void ThrowIfDisposed()
     {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException(nameof(XyoClient));
-        }
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
     /// <summary>
@@ -753,13 +750,15 @@ public sealed class XyoClient : IXyoClient
     /// </summary>
     public void Dispose()
     {
-        if (!_disposed)
+        // Interlocked.Exchange makes the check-and-set atomic: two threads racing Dispose() against each
+        // other, or against an in-flight request's ThrowIfDisposed check, can no longer observe a
+        // partially-disposed state (the plain bool check-then-act this replaced had that gap).
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
             if (_ownsHttpClient)
             {
                 _httpClient.Dispose();
             }
-            _disposed = true;
         }
         GC.SuppressFinalize(this);
     }
