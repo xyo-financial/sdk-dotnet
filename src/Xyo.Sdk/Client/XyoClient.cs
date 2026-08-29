@@ -559,7 +559,7 @@ public sealed class XyoClient : IXyoClient
                 }
                 finally
                 {
-                    ArrayPool<char>.Shared.Return(charBuffer);
+                    ArrayPool<char>.Shared.Return(charBuffer, clearArray: true);
                 }
             }
             catch
