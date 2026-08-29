@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Xyo.Generated.Model;
+using Xyo.Sdk.Client;
 using Xyo.Sdk.Exceptions;
 
 namespace Xyo.Sdk.Streaming;
@@ -18,11 +19,6 @@ namespace Xyo.Sdk.Streaming;
 /// </summary>
 public static class TarStreamReader
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
-
     /// <summary>
     /// Reads and deserializes all enrichment records from a compressed .tar.gz stream into a list.
     /// </summary>
@@ -127,7 +123,7 @@ public static class TarStreamReader
             try
             {
                 var entryBoundedStream = new BoundedReadStream(entry.DataStream, maxEntryBytes, entryName);
-                response = await JsonSerializer.DeserializeAsync<EnrichmentResponse>(entryBoundedStream, JsonOptions, cancellationToken).ConfigureAwait(false);
+                response = await JsonSerializer.DeserializeAsync<EnrichmentResponse>(entryBoundedStream, XyoClient.SerializerOptions, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {

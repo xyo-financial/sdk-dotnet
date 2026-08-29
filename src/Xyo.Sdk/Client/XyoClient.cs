@@ -34,6 +34,13 @@ public sealed class XyoClient : IXyoClient
 
     private static readonly System.Text.Json.JsonSerializerOptions DefaultJsonOptions = CreateJsonSerializerOptions();
 
+    /// <summary>
+    /// The single <see cref="System.Text.Json.JsonSerializerOptions"/> instance used for all enrichment payload
+    /// deserialization across the SDK (unary responses and streamed archive entries alike), so every code path
+    /// agrees on converters and null handling.
+    /// </summary>
+    internal static System.Text.Json.JsonSerializerOptions SerializerOptions => DefaultJsonOptions;
+
     private static System.Text.Json.JsonSerializerOptions CreateJsonSerializerOptions()
     {
         var options = new System.Text.Json.JsonSerializerOptions
@@ -153,9 +160,7 @@ public sealed class XyoClient : IXyoClient
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
 
         var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        var result = await System.Text.Json.JsonSerializer.DeserializeAsync<EnrichmentResponse>(responseStream, DefaultJsonOptions, cancellationToken: cancellationToken).ConfigureAwait(false);
-
-        return result ?? throw new XyoServerException(response.StatusCode, "API server returned an empty payload.");
+        return await DeserializeResponseAsync<EnrichmentResponse>(responseStream, response.StatusCode, "API server returned an empty payload.", cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -235,9 +240,7 @@ public sealed class XyoClient : IXyoClient
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
 
         var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        var result = await System.Text.Json.JsonSerializer.DeserializeAsync<EnrichTransactionCollectionResponse>(responseStream, DefaultJsonOptions, cancellationToken: cancellationToken).ConfigureAwait(false);
-
-        return result ?? throw new XyoServerException(response.StatusCode, "API server returned an empty batch response.");
+        return await DeserializeResponseAsync<EnrichTransactionCollectionResponse>(responseStream, response.StatusCode, "API server returned an empty batch response.", cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -298,9 +301,7 @@ public sealed class XyoClient : IXyoClient
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
 
         var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        var result = await System.Text.Json.JsonSerializer.DeserializeAsync<EnrichmentCollectionStatusResponse>(responseStream, DefaultJsonOptions, cancellationToken: cancellationToken).ConfigureAwait(false);
-
-        return result ?? throw new XyoServerException(response.StatusCode, "API server returned an empty status response.");
+        return await DeserializeResponseAsync<EnrichmentCollectionStatusResponse>(responseStream, response.StatusCode, "API server returned an empty status response.", cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -412,6 +413,30 @@ public sealed class XyoClient : IXyoClient
                 request.Headers.TryAddWithoutValidation(key, value);
             }
         }
+    }
+
+    /// <summary>
+    /// Deserializes a response body, translating malformed-payload failures (e.g. a required field the
+    /// server sent as null) into a typed <see cref="XyoServerException"/> instead of letting a raw
+    /// <see cref="System.Text.Json.JsonException"/> or <see cref="ArgumentException"/> escape.
+    /// </summary>
+    private static async Task<T> DeserializeResponseAsync<T>(Stream stream, HttpStatusCode statusCode, string emptyPayloadMessage, CancellationToken cancellationToken)
+    {
+        T? result;
+        try
+        {
+            result = await System.Text.Json.JsonSerializer.DeserializeAsync<T>(stream, DefaultJsonOptions, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or ArgumentException)
+        {
+            throw new XyoServerException(statusCode, "API returned a payload that does not conform to the enrichment schema.", innerException: ex);
+        }
+
+        return result ?? throw new XyoServerException(statusCode, emptyPayloadMessage);
     }
 
     private static void ValidateHeaderValue(string val, string paramName)
