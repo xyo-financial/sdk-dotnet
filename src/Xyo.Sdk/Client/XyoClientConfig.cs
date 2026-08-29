@@ -22,7 +22,12 @@ public sealed record XyoClientConfig
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string? _apiKey;
     private string? _traceparent;
-    private string _baseUrl = NormalizeBaseUrl(ResolveDefaultBaseUrl());
+    // Deliberately NOT validated here: this field initializer runs on every construction, before an
+    // explicit `BaseUrl = ...` in an object initializer is applied. Validating eagerly would mean an
+    // invalid XYO_API_BASE_URL breaks construction even when the caller overrides BaseUrl explicitly.
+    // The env-var-derived default is validated lazily instead, by XyoClient's constructor, at the point
+    // where we know definitively whether an override was supplied.
+    private string _baseUrl = ResolveDefaultBaseUrl();
     private IReadOnlyDictionary<string, string> _defaultHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -273,12 +278,16 @@ public sealed record XyoClientConfig
     }
 
     /// <summary>
-    /// Validates and normalizes a candidate base URL: must be an absolute URI, HTTPS unless the host is
-    /// loopback, with any trailing slash trimmed. Mirrors the scheme/loopback rules in
-    /// <see cref="Security.DownloadSecurityPolicy"/> so the same policy governs where the Bearer token is
-    /// sent for API calls as for archive downloads.
+    /// Validates and normalizes a candidate base URL: must be an absolute URI with no user info, query, or
+    /// fragment component, HTTPS unless the host is loopback, with any trailing slash trimmed. Mirrors the
+    /// scheme/loopback rules in <see cref="Security.DownloadSecurityPolicy"/> so the same policy governs
+    /// where the Bearer token is sent for API calls as for archive downloads.
     /// </summary>
-    private static string NormalizeBaseUrl(string baseUrl)
+    /// <remarks>
+    /// Internal rather than private so <see cref="XyoClient"/> can re-validate the env-var-derived default
+    /// lazily at construction time; see the comment on the <c>_baseUrl</c> field initializer above.
+    /// </remarks>
+    internal static string NormalizeBaseUrl(string baseUrl)
     {
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
