@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,6 +22,7 @@ public sealed record XyoClientConfig
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string? _apiKey;
     private string? _traceparent;
+    private string _baseUrl = NormalizeBaseUrl(ResolveDefaultBaseUrl());
 
     /// <summary>
     /// Gets the static API token.
@@ -30,12 +32,25 @@ public sealed record XyoClientConfig
     /// <summary>
     /// Gets the dynamic asynchronous API key supplier delegate (for secrets managers and token rotation).
     /// </summary>
+    /// <remarks>
+    /// Invoked on every request that needs a token (no internal caching). If the supplier calls out to a
+    /// secrets manager or token service, it must cache/memoize its own result with an appropriate expiry --
+    /// otherwise every enrichment call pays that round trip, and at batch throughput that round trip becomes
+    /// both a latency multiplier and a throttling risk against the secrets service.
+    /// </remarks>
     public Func<CancellationToken, Task<string>>? ApiKeySupplier { get; init; }
 
     /// <summary>
-    /// Gets the target API base URL (e.g. https://api.xyo.financial or sandbox).
+    /// Gets the target API base URL (e.g. https://api.xyo.financial or sandbox). Must be an absolute HTTPS
+    /// URI; plain HTTP is only accepted for loopback hosts, since the Bearer token would otherwise be sent
+    /// in cleartext. Validated on every construction path, including <c>init</c> (e.g. binding from
+    /// <c>appsettings.json</c> via <see cref="XyoClientOptions"/>), not just <see cref="WithBaseUrl"/>.
     /// </summary>
-    public string BaseUrl { get; init; } = ResolveDefaultBaseUrl();
+    public string BaseUrl
+    {
+        get => _baseUrl;
+        init => _baseUrl = NormalizeBaseUrl(value);
+    }
 
     /// <summary>
     /// Gets the optional distributed tracing correlation identifier attached to requests (X-Correlation-ID).
@@ -150,17 +165,9 @@ public sealed record XyoClientConfig
     }
 
     /// <summary>
-    /// Sets the target API base URL.
+    /// Sets the target API base URL. Validation is centralized in the <see cref="BaseUrl"/> init accessor.
     /// </summary>
-    public XyoClientConfig WithBaseUrl(string baseUrl)
-    {
-        if (string.IsNullOrWhiteSpace(baseUrl))
-        {
-            throw new ArgumentException("Base URL cannot be null or empty.", nameof(baseUrl));
-        }
-
-        return this with { BaseUrl = baseUrl.TrimEnd('/') };
-    }
+    public XyoClientConfig WithBaseUrl(string baseUrl) => this with { BaseUrl = baseUrl };
 
     /// <summary>
     /// Attaches a distributed tracing correlation ID header (X-Correlation-ID).
@@ -251,5 +258,48 @@ public sealed record XyoClientConfig
             return envUrl.TrimEnd('/');
         }
         return DefaultProductionUrl;
+    }
+
+    /// <summary>
+    /// Validates and normalizes a candidate base URL: must be an absolute URI, HTTPS unless the host is
+    /// loopback, with any trailing slash trimmed. Mirrors the scheme/loopback rules in
+    /// <see cref="Security.DownloadSecurityPolicy"/> so the same policy governs where the Bearer token is
+    /// sent for API calls as for archive downloads.
+    /// </summary>
+    private static string NormalizeBaseUrl(string baseUrl)
+    {
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            throw new ArgumentException("Base URL cannot be null or empty.", nameof(baseUrl));
+        }
+
+        string trimmed = baseUrl.TrimEnd('/');
+
+        if (!Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
+        {
+            throw new ArgumentException($"Base URL '{baseUrl}' is not a valid absolute URI.", nameof(baseUrl));
+        }
+
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        {
+            bool isHttpLoopback = string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) && IsLoopbackHost(uri.Host);
+            if (!isHttpLoopback)
+            {
+                throw new ArgumentException(
+                    $"Base URL '{baseUrl}' must use HTTPS (plain HTTP is only permitted for loopback hosts, to avoid transmitting the API key in cleartext).",
+                    nameof(baseUrl));
+            }
+        }
+
+        return trimmed;
+    }
+
+    private static bool IsLoopbackHost(string host)
+    {
+        return string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(host, "127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(host, "[::1]", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(host, "::1", StringComparison.OrdinalIgnoreCase) ||
+               (IPAddress.TryParse(host.Trim('[', ']'), out var ip) && IPAddress.IsLoopback(ip));
     }
 }
