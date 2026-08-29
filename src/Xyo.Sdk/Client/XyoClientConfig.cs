@@ -10,7 +10,7 @@ namespace Xyo.Sdk.Client;
 /// <summary>
 /// Immutable configuration options for initializing the XYO Financial SDK client.
 /// </summary>
-public sealed class XyoClientConfig
+public sealed record XyoClientConfig
 {
     private const string DefaultProductionUrl = "https://api.xyo.financial";
     private static readonly Regex CrlfRegex = new(@"[\r\n]", RegexOptions.Compiled);
@@ -119,22 +119,8 @@ public sealed class XyoClientConfig
     /// <summary>
     /// Sets a dynamic asynchronous token supplier delegate.
     /// </summary>
-    public XyoClientConfig WithTokenSupplier(Func<CancellationToken, Task<string>> supplier)
-    {
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = supplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = CorrelationId,
-            Traceparent = Traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
-        };
-    }
+    public XyoClientConfig WithTokenSupplier(Func<CancellationToken, Task<string>> supplier) =>
+        this with { ApiKeySupplier = supplier };
 
     /// <summary>
     /// Sets a synchronous dynamic token supplier delegate.
@@ -154,19 +140,7 @@ public sealed class XyoClientConfig
             throw new ArgumentException("Base URL cannot be null or empty.", nameof(baseUrl));
         }
 
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = baseUrl.TrimEnd('/'),
-            CorrelationId = CorrelationId,
-            Traceparent = Traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
-        };
+        return this with { BaseUrl = baseUrl.TrimEnd('/') };
     }
 
     /// <summary>
@@ -179,19 +153,7 @@ public sealed class XyoClientConfig
             throw new ArgumentException("Correlation ID contains illegal CRLF injection characters.", nameof(correlationId));
         }
 
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = correlationId,
-            Traceparent = Traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
-        };
+        return this with { CorrelationId = correlationId };
     }
 
     /// <summary>
@@ -213,40 +175,13 @@ public sealed class XyoClientConfig
             throw new ArgumentException("Traceparent header does not conform to the W3C TraceContext format (version-traceid-parentid-flags).", nameof(traceparent));
         }
 
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = CorrelationId,
-            Traceparent = traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
-        };
+        return this with { Traceparent = traceparent };
     }
 
     /// <summary>
     /// Configures the HTTP request timeout duration.
     /// </summary>
-    public XyoClientConfig WithTimeout(TimeSpan timeout)
-    {
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = CorrelationId,
-            Traceparent = Traceparent,
-            Timeout = timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
-        };
-    }
+    public XyoClientConfig WithTimeout(TimeSpan timeout) => this with { Timeout = timeout };
 
     /// <summary>
     /// Adds a trusted corporate internal storage host for Zero-Trust download validation.
@@ -254,19 +189,7 @@ public sealed class XyoClientConfig
     public XyoClientConfig AddTrustedDownloadHost(string host)
     {
         var list = new List<string>(TrustedDownloadHosts) { host.Trim() };
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = CorrelationId,
-            Traceparent = Traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = list,
-            DefaultHeaders = DefaultHeaders
-        };
+        return this with { TrustedDownloadHosts = list };
     }
 
     /// <summary>
@@ -289,19 +212,7 @@ public sealed class XyoClientConfig
             [key] = value
         };
 
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = CorrelationId,
-            Traceparent = Traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = headers
-        };
+        return this with { DefaultHeaders = headers };
     }
 
     /// <summary>
