@@ -101,7 +101,7 @@ public static class TarStreamReader
 
             // Path Traversal / Zip Slip Defense
             string entryName = entry.Name;
-            SanitizeEntryName(entryName);
+            ValidateEntryName(entryName);
 
             // Skip directories or non-regular files
             if (entry.EntryType != TarEntryType.RegularFile && entry.EntryType != TarEntryType.V7RegularFile)
@@ -153,7 +153,7 @@ public static class TarStreamReader
         }
     }
 
-    private static void SanitizeEntryName(string name)
+    private static void ValidateEntryName(string name)
     {
         if (string.IsNullOrWhiteSpace(name))
         {
@@ -196,8 +196,15 @@ public static class TarStreamReader
         public override bool CanRead => _innerStream.CanRead;
         public override bool CanSeek => false;
         public override bool CanWrite => false;
-        public override long Length => _innerStream.Length;
-        public override long Position { get => _innerStream.Position; set => throw new NotSupportedException(); }
+        // CanSeek is false, so Length/Position are unsupported by contract -- thrown explicitly rather than
+        // delegated to the inner stream, which for a network stream would throw its own NotSupportedException
+        // anyway, just less predictably (some inner stream types instead return a stale or default value).
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
 
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {

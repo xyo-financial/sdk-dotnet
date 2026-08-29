@@ -221,6 +221,11 @@ public sealed record XyoClientConfig
     /// </summary>
     public XyoClientConfig AddTrustedDownloadHost(string host)
     {
+        if (host == null)
+        {
+            throw new ArgumentNullException(nameof(host));
+        }
+
         var list = new List<string>(TrustedDownloadHosts) { host.Trim() };
         return this with { TrustedDownloadHosts = list };
     }
