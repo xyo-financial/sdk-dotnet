@@ -286,6 +286,53 @@ public class XyoClientTests
     }
 
     [Fact]
+    public async Task EnsureSuccessResponseAsync_ControlCharactersInBody_FlattenedInMessageButNotInRawResponseBody()
+    {
+        const char esc = '\u001b';
+        const char lineSeparator = '\u2028';
+        const char paragraphSeparator = '\u2029';
+        string body = $"Payment approved{esc}[31mFAKE{esc}[0m\n2026-08-29 INFO forged line {lineSeparator}sep{paragraphSeparator} \0end";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.InternalServerError, body);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+
+        // The summary used in Message must not carry any control character an attacker-influenced body
+        // could inject: CR/LF (log-line forgery), ESC (ANSI escape injection), U+2028/U+2029 (line
+        // separators to JS-based log viewers), or NUL (truncation in C-based sinks).
+        Assert.DoesNotContain(esc, ex.Message);
+        Assert.DoesNotContain('\n', ex.Message);
+        Assert.DoesNotContain('\r', ex.Message);
+        Assert.DoesNotContain(lineSeparator, ex.Message);
+        Assert.DoesNotContain(paragraphSeparator, ex.Message);
+        Assert.DoesNotContain('\0', ex.Message);
+
+        // Full, unaltered fidelity is still available via RawResponseBody for callers who opt into it.
+        Assert.NotNull(ex.RawResponseBody);
+        Assert.Contains(esc, ex.RawResponseBody);
+        Assert.Contains(lineSeparator, ex.RawResponseBody);
+    }
+
+    [Fact]
+    public async Task EnsureSuccessResponseAsync_TruncationBoundarySplitsSurrogatePair_DoesNotEmitLoneSurrogate()
+    {
+        // A surrogate pair (an emoji) placed so it straddles the 512-character clamp boundary.
+        string prefix = new string('A', 511);
+        string body = prefix + "\U0001F600" + new string('B', 100); // U+1F600 = high+low surrogate pair
+        var handler = new MockHttpMessageHandler(HttpStatusCode.InternalServerError, body);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+
+        // Whatever character the message ends on (before the ellipsis), it must not be a lone surrogate --
+        // some structured-log serializers reject a string containing one as invalid UTF-16 outright.
+        string beforeEllipsis = ex.Message.TrimEnd('\u2026');
+        Assert.False(char.IsSurrogate(beforeEllipsis[^1]));
+    }
+
+    [Fact]
     public async Task SendRequestAsync_Timeout_ThrowsXyoNetworkExceptionWithTimeoutDetails()
     {
         var handler = new MockHttpMessageHandler((_, _) =>
