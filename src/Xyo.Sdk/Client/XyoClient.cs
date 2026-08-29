@@ -77,6 +77,13 @@ public sealed class XyoClient : IXyoClient
     /// <summary>
     /// Initializes a new instance of the <see cref="XyoClient"/> class with a custom configuration.
     /// </summary>
+    /// <remarks>
+    /// When <paramref name="httpClient"/> is supplied by the caller (or via DI), the SDK does not own its
+    /// handler and cannot force <c>AllowAutoRedirect = false</c> on it. Egress/SSRF validation on archive
+    /// downloads (see <see cref="DownloadSecurityPolicy"/>) is only guaranteed complete when the SDK
+    /// constructs its own <see cref="HttpClient"/> (i.e. <paramref name="httpClient"/> is <c>null</c>) or
+    /// when the caller's handler also disables automatic redirects.
+    /// </remarks>
     public XyoClient(XyoClientConfig config, HttpClient? httpClient = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -92,7 +99,10 @@ public sealed class XyoClient : IXyoClient
             var handler = new SocketsHttpHandler
             {
                 PooledConnectionLifetime = TimeSpan.FromMinutes(15),
-                ConnectTimeout = TimeSpan.FromSeconds(10)
+                ConnectTimeout = TimeSpan.FromSeconds(10),
+                // The SDK validates every redirect hop itself (see StreamEnrichmentCollectionAsync) against
+                // the download allowlist; letting the handler auto-follow would bypass that validation (SSRF).
+                AllowAutoRedirect = false
             };
             _httpClient = new HttpClient(handler, disposeHandler: true)
             {
@@ -319,6 +329,12 @@ public sealed class XyoClient : IXyoClient
         return list;
     }
 
+    /// <summary>
+    /// Maximum number of redirect hops <see cref="StreamEnrichmentCollectionAsync"/> will follow. Each hop's
+    /// target is re-validated against the download allowlist before it is requested.
+    /// </summary>
+    private const int MaxDownloadRedirects = 5;
+
     /// <inheritdoc />
     public async IAsyncEnumerable<EnrichmentResponse> StreamEnrichmentCollectionAsync(
         string downloadUrl,
@@ -327,45 +343,72 @@ public sealed class XyoClient : IXyoClient
         ThrowIfDisposed();
 
         Uri validatedUri = _securityPolicy.ValidateDownloadUrl(downloadUrl);
+        HttpResponseMessage? response = null;
 
-        var httpRequest = new HttpRequestMessage(HttpMethod.Get, validatedUri);
-        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/gzip"));
-        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/x-tar"));
-        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/octet-stream", 0.9));
-        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*", 0.8));
-
-        // Attach Authorization only if NOT an external S3 / storage host
-        if (!_securityPolicy.IsExternalStorageHost(validatedUri.Host))
-        {
-            string token = await _config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
-            httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        }
-
-        ApplyDefaultHeaders(httpRequest);
-
-        HttpResponseMessage response;
         try
         {
-            response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
-        {
-            throw new XyoNetworkException($"Network request timed out after {_config.Timeout.TotalSeconds} seconds.", ex);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            throw new XyoNetworkException($"Download transport failure: {ex.Message}", ex);
-        }
+            for (int hop = 0; ; hop++)
+            {
+                var httpRequest = new HttpRequestMessage(HttpMethod.Get, validatedUri);
+                httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/gzip"));
+                httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/x-tar"));
+                httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/octet-stream", 0.9));
+                httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*", 0.8));
 
-        using (response)
-        {
-            await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
+                // Attach Authorization only if NOT an external S3 / storage host. Re-decided on every hop,
+                // since a redirect can move the target from an internal host to an external one or vice versa.
+                if (!_securityPolicy.IsExternalStorageHost(validatedUri.Host))
+                {
+                    string token = await _config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
+                    httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                }
 
-            using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                ApplyDefaultHeaders(httpRequest);
+
+                try
+                {
+                    response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new XyoNetworkException($"Network request timed out after {_config.Timeout.TotalSeconds} seconds.", ex);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    throw new XyoNetworkException($"Download transport failure: {ex.Message}", ex);
+                }
+
+                int statusCodeInt = (int)response.StatusCode;
+                bool isRedirect = statusCodeInt is 301 or 302 or 303 or 307 or 308;
+                Uri? redirectLocation = isRedirect ? response.Headers.Location : null;
+
+                if (redirectLocation == null)
+                {
+                    break;
+                }
+
+                if (hop >= MaxDownloadRedirects - 1)
+                {
+                    throw new XyoClientException(System.Net.HttpStatusCode.BadRequest,
+                        $"Archive download exceeded the maximum of {MaxDownloadRedirects} redirects.");
+                }
+
+                Uri nextUri = redirectLocation.IsAbsoluteUri ? redirectLocation : new Uri(validatedUri, redirectLocation);
+                response.Dispose();
+                response = null;
+
+                // Re-run the full allowlist/scheme validation on the redirect target -- this is the control
+                // that stops a trusted host's 3xx from silently sending the client anywhere else (SSRF).
+                validatedUri = _securityPolicy.ValidateDownloadUrl(nextUri.ToString());
+            }
+
+            await EnsureSuccessResponseAsync(response!, cancellationToken).ConfigureAwait(false);
+
+            using var responseStream = await response!.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
 
             await foreach (var record in TarStreamReader.StreamArchiveAsync(
                 responseStream,
@@ -377,6 +420,10 @@ public sealed class XyoClient : IXyoClient
             {
                 yield return record;
             }
+        }
+        finally
+        {
+            response?.Dispose();
         }
     }
 

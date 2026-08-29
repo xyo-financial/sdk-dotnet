@@ -56,7 +56,10 @@ public static class ServiceCollectionExtensions
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(15),
-            ConnectTimeout = TimeSpan.FromSeconds(10)
+            ConnectTimeout = TimeSpan.FromSeconds(10),
+            // The SDK validates every redirect hop itself against the download allowlist;
+            // letting the handler auto-follow would bypass that validation (SSRF).
+            AllowAutoRedirect = false
         })
         .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
@@ -98,7 +101,10 @@ public static class ServiceCollectionExtensions
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(15),
-            ConnectTimeout = TimeSpan.FromSeconds(10)
+            ConnectTimeout = TimeSpan.FromSeconds(10),
+            // The SDK validates every redirect hop itself against the download allowlist;
+            // letting the handler auto-follow would bypass that validation (SSRF).
+            AllowAutoRedirect = false
         })
         .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
