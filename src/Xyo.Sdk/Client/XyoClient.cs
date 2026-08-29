@@ -579,21 +579,29 @@ public sealed class XyoClient : IXyoClient
     /// </summary>
     private static async Task<T> DeserializeResponseAsync<T>(Stream stream, HttpStatusCode statusCode, string emptyPayloadMessage, CancellationToken cancellationToken)
     {
+        // Buffered rather than parsed directly off the stream so a schema-mismatch failure can still
+        // attach the payload that caused it: JsonSerializer.DeserializeAsync(stream) consumes the stream
+        // as it parses, so if a straight streaming parse failed there would be nothing left to read back
+        // -- the one exception whose entire purpose is diagnosing a malformed payload would carry no
+        // payload. Unary response bodies here are modest (a single record, a batch job receipt, a status
+        // lookup), unlike the archive path, which stays genuinely streaming for exactly that reason.
+        string raw;
+        using (var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: false))
+        {
+            raw = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         T? result;
         try
         {
-            result = await System.Text.Json.JsonSerializer.DeserializeAsync<T>(stream, DefaultJsonOptions, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
+            result = System.Text.Json.JsonSerializer.Deserialize<T>(raw, DefaultJsonOptions);
         }
         catch (Exception ex) when (ex is System.Text.Json.JsonException or ArgumentException)
         {
-            throw new XyoServerException(statusCode, "API returned a payload that does not conform to the enrichment schema.", innerException: ex);
+            throw new XyoServerException(statusCode, "API returned a payload that does not conform to the enrichment schema.", rawResponseBody: raw, innerException: ex);
         }
 
-        return result ?? throw new XyoServerException(statusCode, emptyPayloadMessage);
+        return result ?? throw new XyoServerException(statusCode, emptyPayloadMessage, rawResponseBody: raw);
     }
 
     private static void ValidateHeaderValue(string val, string paramName)

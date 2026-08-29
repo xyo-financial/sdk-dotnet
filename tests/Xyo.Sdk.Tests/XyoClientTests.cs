@@ -17,6 +17,32 @@ namespace Xyo.Sdk.Tests;
 public class XyoClientTests
 {
     [Fact]
+    public async Task EnrichTransactionAsync_NullRequiredField_ThrowsWithRawResponseBodyAttached()
+    {
+        // A payload the API is documented to be able to send (a required field returned as null) must
+        // surface as a typed exception carrying the actual payload -- not just a generic message with
+        // nothing to inspect to find out which record/field was the problem.
+        string jsonResponse = @"
+        {
+            ""merchant"": ""Costa Coffee"",
+            ""description"": ""British coffeehouse chain."",
+            ""categories"": [""Food & Dining""],
+            ""logo"": ""https://cdn.xyo.financial/logos/costa.png"",
+            ""location"": null,
+            ""address"": ""40-42 Great Portland St, London W1W 7LZ""
+        }";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, jsonResponse);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+
+        Assert.Contains("does not conform to the enrichment schema", ex.Message);
+        Assert.NotNull(ex.RawResponseBody);
+        Assert.Contains("Costa Coffee", ex.RawResponseBody);
+    }
+
+    [Fact]
     public async Task EnrichTransactionAsync_ValidInput_ReturnsEnrichedProfile()
     {
         string jsonResponse = @"
