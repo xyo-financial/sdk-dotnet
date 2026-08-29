@@ -2,6 +2,7 @@ using System;
 using System.Net.Http;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Xyo.Sdk.Client;
 
@@ -63,7 +64,7 @@ public static class ServiceCollectionExtensions
         })
         .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
-        services.AddTransient<IXyoClient>(sp =>
+        services.TryAddSingleton<IXyoClient>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<XyoClientOptions>>().Value;
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
@@ -108,7 +109,7 @@ public static class ServiceCollectionExtensions
         })
         .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
-        services.AddTransient<IXyoClient>(sp =>
+        services.TryAddSingleton<IXyoClient>(sp =>
         {
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             var httpClient = httpClientFactory.CreateClient(HttpClientName);
