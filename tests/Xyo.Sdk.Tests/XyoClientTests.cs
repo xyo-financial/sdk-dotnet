@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Formats.Tar;
+using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
@@ -401,6 +404,72 @@ public class XyoClientTests
         // redirects taken) before the next one trips the cap -- the message's claimed count must match
         // what actually happened, not be off by one.
         Assert.Equal(XyoClient.MaxDownloadRedirects + 1, handler.CapturedRequests.Count);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_RedirectToExternalStorage_WithholdsTracingHeadersToo()
+    {
+        static byte[] MinimalTarGz()
+        {
+            string record = @"{ ""merchant"": ""M"", ""description"": ""D"", ""categories"": [""General""], " +
+                @"""logo"": ""https://cdn.xyo.financial/logo.png"", ""location"": ""London, UK"", ""address"": ""1 High St"" }";
+
+            using var tarMs = new MemoryStream();
+            using (var tarWriter = new TarWriter(tarMs, TarEntryFormat.Pax, leaveOpen: true))
+            {
+                var entry = new PaxTarEntry(TarEntryType.RegularFile, "001.json")
+                {
+                    DataStream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(record))
+                };
+                tarWriter.WriteEntry(entry);
+            }
+            tarMs.Position = 0;
+            using var gzMs = new MemoryStream();
+            using (var gz = new GZipStream(gzMs, CompressionLevel.Optimal, leaveOpen: true))
+            {
+                tarMs.CopyTo(gz);
+            }
+            return gzMs.ToArray();
+        }
+
+        int callCount = 0;
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            callCount++;
+            if (callCount == 1)
+            {
+                var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+                redirect.Headers.Location = new Uri("https://xyo-financial.s3.amazonaws.com/batches/1.tar.gz");
+                return Task.FromResult(redirect);
+            }
+
+            var final = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(MinimalTarGz())
+            };
+            return Task.FromResult(final);
+        });
+        using var httpClient = new HttpClient(handler);
+        var config = new XyoClientConfig("xyo_test_token")
+            .WithCorrelationId("test-corr-id")
+            .WithTraceparent("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+        using var client = new XyoClient(config, httpClient);
+
+        await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+        {
+        }
+
+        Assert.Equal(2, handler.CapturedRequests.Count);
+
+        var internalRequest = handler.CapturedRequests[0];
+        Assert.True(internalRequest.Headers.NonValidated.Contains("X-Correlation-ID"));
+        Assert.True(internalRequest.Headers.NonValidated.Contains("traceparent"));
+        Assert.NotNull(internalRequest.Headers.Authorization);
+
+        var externalRequest = handler.CapturedRequests[1];
+        Assert.False(externalRequest.Headers.NonValidated.Contains("X-Correlation-ID"));
+        Assert.False(externalRequest.Headers.NonValidated.Contains("traceparent"));
+        Assert.Null(externalRequest.Headers.Authorization);
     }
 
     [Fact]

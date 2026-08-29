@@ -392,8 +392,9 @@ public sealed class XyoClient : IXyoClient
                 httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*", 0.8));
 
                 // Re-decided on every hop, since a redirect can move the target from an internal host to an
-                // external one or vice versa. Neither the Bearer token nor DefaultHeaders (which may carry
-                // caller secrets like an internal API key) are sent to external storage hosts.
+                // external one or vice versa. Neither the Bearer token, nor X-Correlation-ID/traceparent
+                // (live trace/span IDs), nor DefaultHeaders (which may carry caller secrets like an
+                // internal API key) are sent to external storage hosts.
                 bool isExternalStorage = _securityPolicy.IsExternalStorageHost(validatedUri.Host);
                 if (!isExternalStorage)
                 {
@@ -401,7 +402,7 @@ public sealed class XyoClient : IXyoClient
                     httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 }
 
-                ApplyDefaultHeaders(httpRequest, includeDefaultHeaders: !isExternalStorage);
+                ApplyDefaultHeaders(httpRequest, includeInternalOnlyHeaders: !isExternalStorage);
 
                 try
                 {
@@ -468,8 +469,23 @@ public sealed class XyoClient : IXyoClient
         }
     }
 
-    private void ApplyDefaultHeaders(HttpRequestMessage request, string? correlationId = null, string? traceparent = null, bool includeDefaultHeaders = true)
+    /// <param name="request">The outbound request to attach headers to.</param>
+    /// <param name="correlationId">Per-call correlation ID override; falls back to the configured default.</param>
+    /// <param name="traceparent">Per-call traceparent override; falls back to the configured default.</param>
+    /// <param name="includeInternalOnlyHeaders">
+    /// Whether to attach X-Correlation-ID, traceparent, and DefaultHeaders. False when the request targets
+    /// an external archive storage host (see <see cref="DownloadSecurityPolicy.IsExternalStorageHost"/>):
+    /// distributed-tracing headers carry live trace/span IDs and DefaultHeaders may carry caller secrets
+    /// (e.g. an internal API key), neither of which should follow the request to a third party any more
+    /// than the Bearer token does.
+    /// </param>
+    private void ApplyDefaultHeaders(HttpRequestMessage request, string? correlationId = null, string? traceparent = null, bool includeInternalOnlyHeaders = true)
     {
+        if (!includeInternalOnlyHeaders)
+        {
+            return;
+        }
+
         string? effectiveCorrelationId = !string.IsNullOrWhiteSpace(correlationId) ? correlationId : _config.CorrelationId;
         if (!string.IsNullOrWhiteSpace(effectiveCorrelationId))
         {
@@ -495,14 +511,11 @@ public sealed class XyoClient : IXyoClient
             }
         }
 
-        if (includeDefaultHeaders)
+        foreach (var (key, value) in _config.DefaultHeaders)
         {
-            foreach (var (key, value) in _config.DefaultHeaders)
+            if (!request.Headers.NonValidated.Contains(key))
             {
-                if (!request.Headers.NonValidated.Contains(key))
-                {
-                    request.Headers.TryAddWithoutValidation(key, value);
-                }
+                request.Headers.TryAddWithoutValidation(key, value);
             }
         }
     }
