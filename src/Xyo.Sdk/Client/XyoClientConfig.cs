@@ -319,6 +319,24 @@ public sealed record XyoClientConfig
             }
         }
 
+        // Request URIs are built by string interpolation of BaseUrl + a path (see XyoClient.cs), not by
+        // composing against the parsed Uri. A UserInfo/Query/Fragment component here would be validated
+        // against the Uri form but then silently swallow the appended path once reduced back to a string
+        // (a trailing '#' turns the whole intended path into a URI fragment, routing every request to the
+        // host root) -- so those components are rejected outright rather than validated-then-ignored.
+        if (!string.IsNullOrEmpty(uri.UserInfo))
+        {
+            throw new ArgumentException($"Base URL '{baseUrl}' must not contain user info (e.g. 'user:pass@').", nameof(baseUrl));
+        }
+        if (!string.IsNullOrEmpty(uri.Query))
+        {
+            throw new ArgumentException($"Base URL '{baseUrl}' must not contain a query string.", nameof(baseUrl));
+        }
+        if (!string.IsNullOrEmpty(uri.Fragment))
+        {
+            throw new ArgumentException($"Base URL '{baseUrl}' must not contain a fragment.", nameof(baseUrl));
+        }
+
         return trimmed;
     }
 

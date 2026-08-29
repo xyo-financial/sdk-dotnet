@@ -65,6 +65,16 @@ public class XyoClientConfigTests
         Assert.Equal(baseUrl, config.BaseUrl);
     }
 
+    [Theory]
+    [InlineData("https://api.xyo.financial#frag")]
+    [InlineData("https://api.xyo.financial?trace=1")]
+    [InlineData("https://user:pass@api.xyo.financial")]
+    public void WithBaseUrl_UserInfoQueryOrFragment_Throws(string baseUrl)
+    {
+        var config = new XyoClientConfig("key");
+        Assert.Throws<ArgumentException>(() => config.WithBaseUrl(baseUrl));
+    }
+
     [Fact]
     public void ToString_NeverContainsApiKey()
     {
