@@ -29,6 +29,7 @@ public sealed record XyoClientConfig
     // where we know definitively whether an override was supplied.
     private string _baseUrl = ResolveDefaultBaseUrl();
     private IReadOnlyDictionary<string, string> _defaultHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<string> _trustedDownloadHosts = Array.Empty<string>();
 
     /// <summary>
     /// Gets the static API token.
@@ -119,7 +120,13 @@ public sealed record XyoClientConfig
     /// <summary>
     /// Gets the list of additional trusted corporate storage hosts for Zero-Trust download validation.
     /// </summary>
-    public IReadOnlyList<string> TrustedDownloadHosts { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> TrustedDownloadHosts
+    {
+        get => _trustedDownloadHosts;
+        init => _trustedDownloadHosts = value == null
+            ? throw new ArgumentNullException(nameof(value))
+            : new List<string>(value);
+    }
 
     /// <summary>
     /// Gets custom default headers appended to outbound API requests. Not sent to external archive storage
@@ -325,10 +332,20 @@ public sealed record XyoClientConfig
     }
 
     /// <summary>
-    /// Validates every key/value in a candidate default-headers dictionary for CRLF injection (CWE-113).
-    /// <see cref="WithDefaultHeader"/> already validated the entry it adds; this closes the same gap for a
-    /// dictionary assigned directly through the <c>init</c> accessor (e.g. by <see cref="XyoClientOptions"/>).
+    /// Validates every key/value in a candidate default-headers dictionary for CRLF injection (CWE-113)
+    /// and returns a defensive copy. <see cref="WithDefaultHeader"/> already validated the entry it adds;
+    /// this closes the same gap for a dictionary assigned directly through the <c>init</c> accessor (e.g.
+    /// by <see cref="XyoClientOptions"/>).
     /// </summary>
+    /// <remarks>
+    /// Copying is not just defence-in-depth: without it, this validated the caller's own dictionary and
+    /// then stored a live reference to it (<c>XyoClientOptions.ToConfig()</c> hands over its own
+    /// <c>Dictionary</c> by reference), so a caller mutating that dictionary after construction -- e.g.
+    /// still holding the <see cref="XyoClientOptions"/> instance used to build a singleton-registered
+    /// <see cref="XyoClient"/> -- bypassed validation entirely for every request made afterward. The copy
+    /// also normalizes the comparer to <see cref="StringComparer.OrdinalIgnoreCase"/> regardless of what
+    /// the caller's dictionary used, matching this type's own default.
+    /// </remarks>
     private static IReadOnlyDictionary<string, string> ValidateDefaultHeaders(IReadOnlyDictionary<string, string> headers)
     {
         if (headers == null)
@@ -336,14 +353,16 @@ public sealed record XyoClientConfig
             throw new ArgumentNullException(nameof(headers));
         }
 
+        var copy = new Dictionary<string, string>(headers.Count, StringComparer.OrdinalIgnoreCase);
         foreach (var (key, value) in headers)
         {
             if (CrlfRegex.IsMatch(key) || CrlfRegex.IsMatch(value))
             {
                 throw new ArgumentException($"Default header '{key}' contains forbidden CRLF injection characters (CWE-113).", nameof(headers));
             }
+            copy[key] = value;
         }
 
-        return headers;
+        return copy;
     }
 }

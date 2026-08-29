@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Xunit;
 using Xyo.Sdk.Client;
 
@@ -69,5 +70,44 @@ public class XyoClientConfigTests
     {
         var config = new XyoClientConfig("SUPER_SECRET_TOKEN");
         Assert.DoesNotContain("SUPER_SECRET_TOKEN", config.ToString());
+    }
+
+    [Fact]
+    public void DefaultHeaders_MutatingCallersDictionaryAfterConstruction_DoesNotAffectConfig()
+    {
+        var callerDict = new Dictionary<string, string> { ["X-Tenant"] = "acme" };
+        var config = new XyoClientConfig("key") { DefaultHeaders = callerDict };
+
+        callerDict["X-Evil"] = "ok\r\nX-Injected: pwned";
+        callerDict["X-Tenant"] = "tampered";
+
+        Assert.False(config.DefaultHeaders.ContainsKey("X-Evil"));
+        Assert.Equal("acme", config.DefaultHeaders["X-Tenant"]);
+    }
+
+    [Fact]
+    public void DefaultHeaders_ValidatesEveryEntry_EvenWithoutOrdinalIgnoreCaseComparer()
+    {
+        // A caller-supplied dictionary using a different (or no) comparer must not bypass validation,
+        // and the stored copy should still de-duplicate case-insensitively like the type's own default.
+        var callerDict = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["X-Tenant"] = "acme"
+        };
+
+        var config = new XyoClientConfig("key") { DefaultHeaders = callerDict };
+
+        Assert.True(config.DefaultHeaders.ContainsKey("x-tenant"));
+    }
+
+    [Fact]
+    public void TrustedDownloadHosts_MutatingCallersListAfterConstruction_DoesNotAffectConfig()
+    {
+        var callerList = new List<string> { "storage.internal.bank.corp" };
+        var config = new XyoClientConfig("key") { TrustedDownloadHosts = callerList };
+
+        callerList.Add("attacker.example.com");
+
+        Assert.DoesNotContain("attacker.example.com", config.TrustedDownloadHosts);
     }
 }
