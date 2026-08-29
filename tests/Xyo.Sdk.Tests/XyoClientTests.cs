@@ -354,6 +354,56 @@ public class XyoClientTests
     }
 
     [Fact]
+    public async Task StreamEnrichmentCollectionAsync_RedirectToUntrustedHost_ThrowsXyoClientException()
+    {
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Found);
+            response.Headers.Location = new Uri("https://attacker.evil.com/archive.tar.gz");
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+            {
+            }
+        });
+
+        Assert.Contains("not in the trusted domain allowlist", ex.Message);
+        // Refused on the redirect itself -- the attacker host is never actually requested.
+        Assert.Single(handler.CapturedRequests);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_RedirectLoop_StopsAtMaxDownloadRedirectsWithAccurateCount()
+    {
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Found);
+            response.Headers.Location = new Uri("https://api.xyo.financial/batches/next.tar.gz");
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+            {
+            }
+        });
+
+        Assert.Contains($"maximum of {XyoClient.MaxDownloadRedirects} redirects", ex.Message);
+        // MaxDownloadRedirects redirects are genuinely followed (that many requests are made and their
+        // redirects taken) before the next one trips the cap -- the message's claimed count must match
+        // what actually happened, not be off by one.
+        Assert.Equal(XyoClient.MaxDownloadRedirects + 1, handler.CapturedRequests.Count);
+    }
+
+    [Fact]
     public void XyoClient_IsSealed_SatisfiesSonarQubeS3881()
     {
         Assert.True(typeof(XyoClient).IsSealed, "XyoClient must be sealed to conform to SonarQube rule S3881.");

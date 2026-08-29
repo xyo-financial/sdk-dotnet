@@ -363,7 +363,7 @@ public sealed class XyoClient : IXyoClient
     /// Maximum number of redirect hops <see cref="StreamEnrichmentCollectionAsync"/> will follow. Each hop's
     /// target is re-validated against the download allowlist before it is requested.
     /// </summary>
-    private const int MaxDownloadRedirects = 5;
+    internal const int MaxDownloadRedirects = 5;
 
     /// <inheritdoc />
     public async IAsyncEnumerable<EnrichmentResponse> StreamEnrichmentCollectionAsync(
@@ -429,7 +429,10 @@ public sealed class XyoClient : IXyoClient
                     break;
                 }
 
-                if (hop >= MaxDownloadRedirects - 1)
+                // hop is 0-indexed and this check runs before following the redirect just received, so
+                // "hop >= MaxDownloadRedirects" (not "- 1") is what actually allows MaxDownloadRedirects
+                // redirects to be followed before giving up on the next one.
+                if (hop >= MaxDownloadRedirects)
                 {
                     throw new XyoClientException(System.Net.HttpStatusCode.BadRequest,
                         $"Archive download exceeded the maximum of {MaxDownloadRedirects} redirects.");

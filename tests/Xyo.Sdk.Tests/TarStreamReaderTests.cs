@@ -92,6 +92,33 @@ public class TarStreamReaderTests
     }
 
     [Fact]
+    public async Task ReadArchiveAsync_AggregateDecompressedSizeExceedingMaxDecompressedBytes_ThrowsXyoClientException()
+    {
+        // Each entry individually stays well under maxEntryBytes; it is only the SUM across entries that
+        // exceeds maxDecompressedBytes. This specifically exercises the aggregate bound, not the per-entry
+        // one -- the bound that was missing entirely before the archive-download-bytes bug was fixed.
+        // Schema-complete (all required fields present, so an individual entry under the threshold
+        // deserializes successfully rather than failing fast on a missing-field error) with the bulk of
+        // its size in one huge quoted string value, so the JSON reader must keep pulling bytes from the
+        // stream while scanning for the closing quote -- giving the aggregate bound a chance to trip
+        // mid-read once the cumulative total across entries crosses it.
+        string bigRecord =
+            @"{ ""merchant"": ""M"", ""description"": """ + new string('A', 80_000) + @""", " +
+            @"""categories"": [""General""], ""logo"": ""https://cdn.xyo.financial/logo.png"", " +
+            @"""location"": ""London, UK"", ""address"": ""1 High St"" }";
+        byte[] archiveBytes = CreateValidTarGz(
+            ("001.json", bigRecord),
+            ("002.json", bigRecord),
+            ("003.json", bigRecord));
+
+        using var ms = new MemoryStream(archiveBytes);
+        var ex = await Assert.ThrowsAsync<XyoClientException>(() =>
+            TarStreamReader.ReadArchiveAsync(ms, maxDecompressedBytes: 150_000, maxEntryBytes: 200_000));
+
+        Assert.Contains("exceeded maximum allowed byte size", ex.Message);
+    }
+
+    [Fact]
     public async Task ReadArchiveAsync_EntryCountExceedingMaxTarEntries_ThrowsXyoClientException()
     {
         string CompleteRecord(string merchant) =>
