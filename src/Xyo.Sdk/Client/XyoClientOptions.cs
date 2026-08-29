@@ -39,6 +39,13 @@ public sealed class XyoClientOptions
     public long MaxArchiveBytes { get; set; } = 104_857_600;
 
     /// <summary>
+    /// Gets or sets the maximum total decompressed byte count allowed while inflating an archive (default
+    /// 2000 MiB). Bounds the expansion itself, independent of <see cref="MaxArchiveBytes"/> which only bounds
+    /// bytes read off the wire before decompression.
+    /// </summary>
+    public long MaxDecompressedBytes { get; set; } = 2_097_152_000;
+
+    /// <summary>
     /// Gets or sets the maximum allowed size per extracted TAR entry (default 10 MiB).
     /// </summary>
     public long MaxEntryBytes { get; set; } = 10_485_760;
@@ -65,6 +72,7 @@ public sealed class XyoClientOptions
             Traceparent = Traceparent,
             Timeout = Timeout,
             MaxArchiveBytes = MaxArchiveBytes,
+            MaxDecompressedBytes = MaxDecompressedBytes,
             MaxEntryBytes = MaxEntryBytes,
             MaxTarEntries = MaxTarEntries,
             TrustedDownloadHosts = TrustedDownloadHosts

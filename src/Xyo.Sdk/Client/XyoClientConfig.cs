@@ -67,6 +67,14 @@ public sealed record XyoClientConfig
     public long MaxArchiveBytes { get; init; } = 104_857_600; // 100 MiB
 
     /// <summary>
+    /// Gets the maximum total decompressed byte count allowed while inflating an archive (default 2000 MiB,
+    /// a 20:1 ratio over <see cref="MaxArchiveBytes"/>). <see cref="MaxArchiveBytes"/> only bounds bytes read
+    /// off the wire, before decompression; this bounds the expansion itself, which is what a decompression
+    /// bomb (CWE-400) actually attacks.
+    /// </summary>
+    public long MaxDecompressedBytes { get; init; } = 2_097_152_000; // 2000 MiB
+
+    /// <summary>
     /// Gets the maximum allowed decompressed size per TAR entry (default 10 MiB).
     /// </summary>
     public long MaxEntryBytes { get; init; } = 10_485_760; // 10 MiB

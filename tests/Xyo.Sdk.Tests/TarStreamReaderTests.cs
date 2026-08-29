@@ -94,10 +94,13 @@ public class TarStreamReaderTests
     [Fact]
     public async Task ReadArchiveAsync_EntryCountExceedingMaxTarEntries_ThrowsXyoClientException()
     {
+        string CompleteRecord(string merchant) =>
+            $@"{{ ""merchant"": ""{merchant}"", ""description"": ""Desc"", ""categories"": [""General""], ""logo"": ""https://cdn.xyo.financial/logo.png"", ""location"": ""London, UK"", ""address"": ""1 High St"" }}";
+
         byte[] archiveBytes = CreateValidTarGz(
-            ("1.json", @"{""merchant"":""M1""}"),
-            ("2.json", @"{""merchant"":""M2""}"),
-            ("3.json", @"{""merchant"":""M3""}")
+            ("1.json", CompleteRecord("M1")),
+            ("2.json", CompleteRecord("M2")),
+            ("3.json", CompleteRecord("M3"))
         );
 
         using var ms = new MemoryStream(archiveBytes);
@@ -108,8 +111,8 @@ public class TarStreamReaderTests
     [Fact]
     public async Task StreamArchiveAsync_StreamsRecordsSuccessfully()
     {
-        string record1 = @"{ ""merchant"": ""Merchant A"", ""description"": ""Desc A"", ""categories"": [""General""] }";
-        string record2 = @"{ ""merchant"": ""Merchant B"", ""description"": ""Desc B"", ""categories"": [""General""] }";
+        string record1 = @"{ ""merchant"": ""Merchant A"", ""description"": ""Desc A"", ""categories"": [""General""], ""logo"": ""https://cdn.xyo.financial/a.png"", ""location"": ""London, UK"", ""address"": ""1 High St"" }";
+        string record2 = @"{ ""merchant"": ""Merchant B"", ""description"": ""Desc B"", ""categories"": [""General""], ""logo"": ""https://cdn.xyo.financial/b.png"", ""location"": ""Seattle, US"", ""address"": ""1 Pike St"" }";
 
         byte[] archiveBytes = CreateValidTarGz(
             ("a.json", record1),

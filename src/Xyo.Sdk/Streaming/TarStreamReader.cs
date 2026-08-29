@@ -29,12 +29,13 @@ public static class TarStreamReader
     public static async Task<IReadOnlyList<EnrichmentResponse>> ReadArchiveAsync(
         Stream compressedStream,
         long maxArchiveBytes = 104_857_600, // 100 MiB
+        long maxDecompressedBytes = 2_097_152_000, // 2000 MiB
         long maxEntryBytes = 10_485_760,   // 10 MiB
         int maxTarEntries = 50_000,
         CancellationToken cancellationToken = default)
     {
         var results = new List<EnrichmentResponse>();
-        await foreach (var item in StreamArchiveAsync(compressedStream, maxArchiveBytes, maxEntryBytes, maxTarEntries, cancellationToken).ConfigureAwait(false))
+        await foreach (var item in StreamArchiveAsync(compressedStream, maxArchiveBytes, maxDecompressedBytes, maxEntryBytes, maxTarEntries, cancellationToken).ConfigureAwait(false))
         {
             results.Add(item);
         }
@@ -47,6 +48,7 @@ public static class TarStreamReader
     public static async IAsyncEnumerable<EnrichmentResponse> StreamArchiveAsync(
         Stream compressedStream,
         long maxArchiveBytes = 104_857_600,
+        long maxDecompressedBytes = 2_097_152_000,
         long maxEntryBytes = 10_485_760,
         int maxTarEntries = 50_000,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -56,11 +58,16 @@ public static class TarStreamReader
             throw new ArgumentNullException(nameof(compressedStream));
         }
 
-        // Bounded stream wrapper to track read bytes against maxArchiveBytes
-        var countingStream = new BoundedReadStream(compressedStream, maxArchiveBytes);
+        // Bounded stream wrapper to track wire (compressed) bytes read against maxArchiveBytes
+        var wireStream = new BoundedReadStream(compressedStream, maxArchiveBytes);
 
-        using var gzipStream = new GZipStream(countingStream, CompressionMode.Decompress, leaveOpen: true);
-        using var tarReader = new TarReader(gzipStream, leaveOpen: true);
+        using var gzipStream = new GZipStream(wireStream, CompressionMode.Decompress, leaveOpen: true);
+
+        // Independent bound on total INFLATED bytes -- this is the actual decompression-bomb defense.
+        // maxArchiveBytes above only limits bytes taken off the wire before inflation.
+        var inflatedStream = new BoundedReadStream(gzipStream, maxDecompressedBytes);
+
+        using var tarReader = new TarReader(inflatedStream, leaveOpen: true);
 
         int entryCount = 0;
 

@@ -370,6 +370,7 @@ public sealed class XyoClient : IXyoClient
             await foreach (var record in TarStreamReader.StreamArchiveAsync(
                 responseStream,
                 _config.MaxArchiveBytes,
+                _config.MaxDecompressedBytes,
                 _config.MaxEntryBytes,
                 _config.MaxTarEntries,
                 cancellationToken).ConfigureAwait(false))
