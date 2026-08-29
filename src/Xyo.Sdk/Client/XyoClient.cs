@@ -570,9 +570,11 @@ public sealed class XyoClient : IXyoClient
                     ArrayPool<char>.Shared.Return(charBuffer, clearArray: true);
                 }
             }
-            catch
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // Ignored
+                // Ignored: best-effort read of the error body for the exception message; a malformed or
+                // truncated body still falls through to the fallback message below. Cancellation is not
+                // swallowed here, so a caller cancelling mid-read still observes OperationCanceledException.
             }
         }
 
