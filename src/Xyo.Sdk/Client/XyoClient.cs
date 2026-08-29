@@ -574,7 +574,7 @@ public sealed class XyoClient : IXyoClient
                     rawResponseBody: rawPayload);
             }
 
-            string msg = !string.IsNullOrWhiteSpace(rawPayload) ? rawPayload : "[HTTP 429] Rate limit exceeded. Too many requests.";
+            string msg = SafeSummary(rawPayload, statusCodeInt, "Rate limit exceeded. Too many requests.");
             throw new RateLimitException(
                 response.StatusCode,
                 msg,
@@ -587,7 +587,7 @@ public sealed class XyoClient : IXyoClient
 
         if (statusCodeInt >= 500)
         {
-            string msg = !string.IsNullOrWhiteSpace(rawPayload) ? rawPayload : $"[HTTP {statusCodeInt}] Upstream server error.";
+            string msg = SafeSummary(rawPayload, statusCodeInt, "Upstream server error.");
             throw new XyoServerException(response.StatusCode, msg, rawPayload);
         }
 
@@ -598,11 +598,29 @@ public sealed class XyoClient : IXyoClient
                 throw XyoProblemDetailsException.FromJson(response.StatusCode, rawPayload);
             }
 
-            string msg = !string.IsNullOrWhiteSpace(rawPayload) ? rawPayload : $"[HTTP {statusCodeInt}] Client error.";
+            string msg = SafeSummary(rawPayload, statusCodeInt, "Client error.");
             throw new XyoClientException(response.StatusCode, msg, rawPayload);
         }
 
         throw new XyoClientException(response.StatusCode, $"[HTTP {statusCodeInt}] Unexpected HTTP response.", rawPayload);
+    }
+
+    /// <summary>
+    /// Builds a log-safe exception message summary from a raw server response body: CRLF-flattened (CWE-117)
+    /// and length-clamped, never the full payload. Callers needing full fidelity use <c>RawResponseBody</c>
+    /// on the thrown exception, which is never truncated or altered.
+    /// </summary>
+    private static string SafeSummary(string rawPayload, int statusCode, string fallback)
+    {
+        if (string.IsNullOrWhiteSpace(rawPayload))
+        {
+            return $"[HTTP {statusCode}] {fallback}";
+        }
+
+        const int maxLength = 512;
+        string flattened = CrlfRegex.Replace(rawPayload, " ");
+        string clamped = flattened.Length > maxLength ? $"{flattened[..maxLength]}…" : flattened;
+        return $"[HTTP {statusCode}] {clamped}";
     }
 
     private static (int? retryAfter, int? limit, int? remaining, int? reset) ParseRateLimitHeaders(HttpResponseMessage response)
