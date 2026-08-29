@@ -27,9 +27,9 @@ namespace Xyo.Sdk.Client;
 public sealed class XyoClient : IXyoClient
 {
     private static readonly Regex CrlfRegex = new(@"[\r\n]", RegexOptions.Compiled);
-    private static readonly Regex CountryCodeRegex = new(@"^[A-Za-z]{2}$", RegexOptions.Compiled);
+    private static readonly Regex CountryCodeRegex = new(@"^[A-Za-z]{2}\z", RegexOptions.Compiled);
     private static readonly Regex TraceparentRegex = new(
-        @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+        @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\z",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly System.Text.Json.JsonSerializerOptions DefaultJsonOptions = CreateJsonSerializerOptions();
@@ -653,7 +653,7 @@ public sealed class XyoClient : IXyoClient
             (response.Content != null && response.Content.Headers.TryGetValues(headerName, out values)))
         {
             string? val = values?.FirstOrDefault();
-            if (int.TryParse(val, out int result))
+            if (int.TryParse(val, NumberStyles.None, CultureInfo.InvariantCulture, out int result))
             {
                 return result;
             }
@@ -670,7 +670,7 @@ public sealed class XyoClient : IXyoClient
             string? val = values?.FirstOrDefault();
             if (string.IsNullOrWhiteSpace(val)) return null;
 
-            if (int.TryParse(val, out int seconds))
+            if (int.TryParse(val, NumberStyles.None, CultureInfo.InvariantCulture, out int seconds))
             {
                 return seconds;
             }

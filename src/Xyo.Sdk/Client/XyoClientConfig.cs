@@ -16,7 +16,7 @@ public sealed record XyoClientConfig
     private const string DefaultProductionUrl = "https://api.xyo.financial";
     private static readonly Regex CrlfRegex = new(@"[\r\n]", RegexOptions.Compiled);
     private static readonly Regex TraceparentRegex = new(
-        @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+        @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\z",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
