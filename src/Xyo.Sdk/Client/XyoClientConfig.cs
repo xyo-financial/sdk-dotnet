@@ -57,9 +57,20 @@ public sealed record XyoClientConfig
     }
 
     /// <summary>
-    /// Gets the HTTP request timeout duration.
+    /// Gets the timeout duration for a single unary API call (enrichment, batch submit, status lookup).
+    /// Enforced independently per call via a linked cancellation token; does not bound archive downloads,
+    /// see <see cref="DownloadTimeout"/>.
     /// </summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Gets the timeout duration for the entire bulk archive download and processing operation
+    /// (<see cref="Xyo.Sdk.Client.IXyoClient.StreamEnrichmentCollectionAsync"/> /
+    /// <see cref="Xyo.Sdk.Client.IXyoClient.DownloadEnrichmentCollectionAsync"/>), covering all redirect
+    /// hops plus the full download and decompression. Kept independent of <see cref="Timeout"/> because a
+    /// multi-hundred-MB archive legitimately needs far longer than a single unary call.
+    /// </summary>
+    public TimeSpan DownloadTimeout { get; init; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
     /// Gets the maximum allowed download archive byte size for bulk processing (default 100 MiB).

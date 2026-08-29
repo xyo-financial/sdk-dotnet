@@ -29,9 +29,16 @@ public sealed class XyoClientOptions
     public string? Traceparent { get; set; }
 
     /// <summary>
-    /// Gets or sets the HTTP request timeout duration (default 30 seconds).
+    /// Gets or sets the timeout duration for a single unary API call (default 30 seconds). Does not bound
+    /// archive downloads, see <see cref="DownloadTimeout"/>.
     /// </summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Gets or sets the timeout duration for the entire bulk archive download and processing operation
+    /// (default 10 minutes), independent of <see cref="Timeout"/>.
+    /// </summary>
+    public TimeSpan DownloadTimeout { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
     /// Gets or sets the maximum allowed download archive byte size for bulk processing (default 100 MiB).
@@ -71,6 +78,7 @@ public sealed class XyoClientOptions
             CorrelationId = CorrelationId,
             Traceparent = Traceparent,
             Timeout = Timeout,
+            DownloadTimeout = DownloadTimeout,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxDecompressedBytes = MaxDecompressedBytes,
             MaxEntryBytes = MaxEntryBytes,

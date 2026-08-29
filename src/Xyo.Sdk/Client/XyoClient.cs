@@ -106,7 +106,11 @@ public sealed class XyoClient : IXyoClient
             };
             _httpClient = new HttpClient(handler, disposeHandler: true)
             {
-                Timeout = _config.Timeout
+                // HttpClient.Timeout is a single TOTAL deadline that keeps running while a response stream is
+                // consumed, which would kill a multi-hundred-MB archive download mid-stream. Deadlines are
+                // enforced per call instead, via linked CancellationTokenSources: Timeout for unary calls
+                // (see SendRequestAsync) and DownloadTimeout for StreamEnrichmentCollectionAsync.
+                Timeout = System.Threading.Timeout.InfiniteTimeSpan
             };
             _ownsHttpClient = true;
         }
@@ -345,6 +349,12 @@ public sealed class XyoClient : IXyoClient
         Uri validatedUri = _securityPolicy.ValidateDownloadUrl(downloadUrl);
         HttpResponseMessage? response = null;
 
+        // DownloadTimeout bounds the whole operation (every redirect hop plus the full download and
+        // decompression), independently of the shorter unary-call Timeout -- see SendRequestAsync.
+        using var timeoutCts = new CancellationTokenSource(_config.DownloadTimeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+        CancellationToken effectiveToken = linkedCts.Token;
+
         try
         {
             for (int hop = 0; ; hop++)
@@ -359,7 +369,7 @@ public sealed class XyoClient : IXyoClient
                 // since a redirect can move the target from an internal host to an external one or vice versa.
                 if (!_securityPolicy.IsExternalStorageHost(validatedUri.Host))
                 {
-                    string token = await _config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
+                    string token = await _config.ResolveTokenAsync(effectiveToken).ConfigureAwait(false);
                     httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 }
 
@@ -367,11 +377,11 @@ public sealed class XyoClient : IXyoClient
 
                 try
                 {
-                    response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                    response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, effectiveToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
                 {
-                    throw new XyoNetworkException($"Network request timed out after {_config.Timeout.TotalSeconds} seconds.", ex);
+                    throw new XyoNetworkException($"Archive download timed out after {_config.DownloadTimeout.TotalSeconds} seconds.", ex);
                 }
                 catch (OperationCanceledException)
                 {
@@ -406,9 +416,9 @@ public sealed class XyoClient : IXyoClient
                 validatedUri = _securityPolicy.ValidateDownloadUrl(nextUri.ToString());
             }
 
-            await EnsureSuccessResponseAsync(response!, cancellationToken).ConfigureAwait(false);
+            await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
 
-            using var responseStream = await response!.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var responseStream = await response!.Content.ReadAsStreamAsync(effectiveToken).ConfigureAwait(false);
 
             await foreach (var record in TarStreamReader.StreamArchiveAsync(
                 responseStream,
@@ -416,7 +426,7 @@ public sealed class XyoClient : IXyoClient
                 _config.MaxDecompressedBytes,
                 _config.MaxEntryBytes,
                 _config.MaxTarEntries,
-                cancellationToken).ConfigureAwait(false))
+                effectiveToken).ConfigureAwait(false))
             {
                 yield return record;
             }
@@ -500,9 +510,12 @@ public sealed class XyoClient : IXyoClient
         HttpCompletionOption completionOption,
         CancellationToken cancellationToken)
     {
+        using var timeoutCts = new CancellationTokenSource(_config.Timeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
         try
         {
-            return await _httpClient.SendAsync(request, completionOption, cancellationToken).ConfigureAwait(false);
+            return await _httpClient.SendAsync(request, completionOption, linkedCts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {

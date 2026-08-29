@@ -49,10 +49,12 @@ public static class ServiceCollectionExtensions
 
         services.Configure(configureOptions);
 
-        var builder = services.AddHttpClient(HttpClientName, (sp, client) =>
+        var builder = services.AddHttpClient(HttpClientName, client =>
         {
-            var options = sp.GetRequiredService<IOptions<XyoClientOptions>>().Value;
-            client.Timeout = options.Timeout;
+            // XyoClient enforces XyoClientOptions.Timeout / DownloadTimeout itself per call via a linked
+            // CancellationTokenSource; HttpClient's own Timeout is a single total deadline that would kill a
+            // large archive download mid-stream, so it is left infinite.
+            client.Timeout = Timeout.InfiniteTimeSpan;
         })
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
         {
@@ -97,7 +99,9 @@ public static class ServiceCollectionExtensions
 
         var builder = services.AddHttpClient(HttpClientName, client =>
         {
-            client.Timeout = config.Timeout;
+            // See the other AddXyoClient overload: XyoClient enforces its own per-call deadlines, so the
+            // HttpClient-level timeout is left infinite rather than capping the whole connection lifetime.
+            client.Timeout = Timeout.InfiniteTimeSpan;
         })
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
         {

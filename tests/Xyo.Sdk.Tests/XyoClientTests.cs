@@ -319,7 +319,7 @@ public class XyoClientTests
         var handler = new MockHttpMessageHandler((_, _) =>
             throw new TaskCanceledException("The request was canceled due to timeout."));
         using var httpClient = new HttpClient(handler);
-        var config = new XyoClientConfig("xyo_test_token") { Timeout = TimeSpan.FromSeconds(15) };
+        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromSeconds(20) };
         using var client = new XyoClient(config, httpClient);
 
         var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
@@ -328,7 +328,7 @@ public class XyoClientTests
             {
             }
         });
-        Assert.Contains("Network request timed out after 15 seconds.", ex.Message);
+        Assert.Contains("Archive download timed out after 20 seconds.", ex.Message);
     }
 
     [Fact]
