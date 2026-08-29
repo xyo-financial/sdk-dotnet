@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Xyo.Sdk.Client;
 
@@ -14,9 +16,18 @@ public sealed class XyoClientOptions
     public string? ApiKey { get; set; }
 
     /// <summary>
-    /// Gets or sets the target API base URL (defaults to https://api.xyo.financial).
+    /// Gets or sets the dynamic asynchronous API key supplier delegate (for secrets managers and token
+    /// rotation). See the equivalent member on <see cref="XyoClientConfig.ApiKeySupplier"/> for the
+    /// caching contract it must uphold.
     /// </summary>
-    public string BaseUrl { get; set; } = "https://api.xyo.financial";
+    public Func<CancellationToken, Task<string>>? ApiKeySupplier { get; set; }
+
+    /// <summary>
+    /// Gets or sets the target API base URL. Defaults to the XYO_API_BASE_URL environment variable when
+    /// set, falling back to https://api.xyo.financial -- matching <see cref="XyoClientConfig"/>'s default so
+    /// DI-registered clients don't silently lose environment-based redirection.
+    /// </summary>
+    public string BaseUrl { get; set; } = ResolveDefaultBaseUrl();
 
     /// <summary>
     /// Gets or sets the default correlation ID (X-Correlation-ID).
@@ -68,12 +79,18 @@ public sealed class XyoClientOptions
     public List<string> TrustedDownloadHosts { get; set; } = new();
 
     /// <summary>
+    /// Gets or sets custom default headers appended to outbound API requests.
+    /// </summary>
+    public Dictionary<string, string> DefaultHeaders { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Converts this options instance to an immutable <see cref="XyoClientConfig"/>.
     /// </summary>
     public XyoClientConfig ToConfig()
     {
         return new XyoClientConfig(ApiKey)
         {
+            ApiKeySupplier = ApiKeySupplier,
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
             Traceparent = Traceparent,
@@ -83,7 +100,14 @@ public sealed class XyoClientOptions
             MaxDecompressedBytes = MaxDecompressedBytes,
             MaxEntryBytes = MaxEntryBytes,
             MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts
+            TrustedDownloadHosts = TrustedDownloadHosts,
+            DefaultHeaders = DefaultHeaders
         };
+    }
+
+    private static string ResolveDefaultBaseUrl()
+    {
+        string? envUrl = Environment.GetEnvironmentVariable("XYO_API_BASE_URL");
+        return string.IsNullOrWhiteSpace(envUrl) ? "https://api.xyo.financial" : envUrl;
     }
 }
