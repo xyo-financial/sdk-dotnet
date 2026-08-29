@@ -452,15 +452,67 @@ public sealed class XyoClient : IXyoClient
 
             using var responseStream = await response!.Content.ReadAsStreamAsync(effectiveToken).ConfigureAwait(false);
 
-            await foreach (var record in TarStreamReader.StreamArchiveAsync(
+            // From here on, DownloadTimeout is enforced per-record (reset before each one) instead of as a
+            // single deadline spanning the whole enumeration. The timeoutCts above ticks continuously in
+            // real time regardless of what the caller does between MoveNextAsync calls -- with a single
+            // deadline for the entire await-foreach, time the CALLER spends processing each yielded record
+            // (e.g. a database write) counted against the SDK's own budget. At the shipped defaults
+            // (MaxTarEntries=50,000, DownloadTimeout=10 min) that budget is exhausted at ~12ms of consumer
+            // work per record, on a network that was never slow. A fresh per-record window means only an
+            // actual stall in the network read or decompression trips it; the caller's own processing time
+            // is never counted, no matter how long it takes.
+            var recordEnumerator = TarStreamReader.StreamArchiveAsync(
                 responseStream,
                 _config.MaxArchiveBytes,
                 _config.MaxDecompressedBytes,
                 _config.MaxEntryBytes,
                 _config.MaxTarEntries,
-                effectiveToken).ConfigureAwait(false))
+                cancellationToken).GetAsyncEnumerator(cancellationToken);
+
+            try
             {
-                yield return record;
+                while (true)
+                {
+                    bool hasNext;
+                    try
+                    {
+                        hasNext = await recordEnumerator.MoveNextAsync().AsTask()
+                            .WaitAsync(_config.DownloadTimeout, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (TimeoutException ex)
+                    {
+                        // Task.WaitAsync(TimeSpan, CancellationToken) throws TimeoutException when the
+                        // per-record budget elapses, and OperationCanceledException (left unhandled, so it
+                        // propagates as-is) when cancellationToken itself fires -- the two are already
+                        // disambiguated for us, unlike the SendAsync phase above which has to distinguish
+                        // them via the `when` filter on a single combined token.
+                        throw new XyoNetworkException(
+                            $"Archive download stalled for more than {_config.DownloadTimeout.TotalSeconds} seconds without producing a record.", ex);
+                    }
+
+                    if (!hasNext)
+                    {
+                        break;
+                    }
+
+                    yield return recordEnumerator.Current;
+                }
+            }
+            finally
+            {
+                try
+                {
+                    await recordEnumerator.DisposeAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best-effort cleanup. Disposing the inner tar/gzip reader chain mid-entry (e.g. after
+                    // the timeout above, or the caller breaking out of the enumeration early) can itself
+                    // throw while it tries to skip the unread remainder of a non-seekable stream -- an
+                    // exception here would otherwise REPLACE whatever exception is already propagating out
+                    // of the try block above per C#'s finally-block semantics, masking the real failure
+                    // behind an unrelated one from cleanup.
+                }
             }
         }
         finally
