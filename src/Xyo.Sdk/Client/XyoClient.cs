@@ -365,15 +365,17 @@ public sealed class XyoClient : IXyoClient
                 httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/octet-stream", 0.9));
                 httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*", 0.8));
 
-                // Attach Authorization only if NOT an external S3 / storage host. Re-decided on every hop,
-                // since a redirect can move the target from an internal host to an external one or vice versa.
-                if (!_securityPolicy.IsExternalStorageHost(validatedUri.Host))
+                // Re-decided on every hop, since a redirect can move the target from an internal host to an
+                // external one or vice versa. Neither the Bearer token nor DefaultHeaders (which may carry
+                // caller secrets like an internal API key) are sent to external storage hosts.
+                bool isExternalStorage = _securityPolicy.IsExternalStorageHost(validatedUri.Host);
+                if (!isExternalStorage)
                 {
                     string token = await _config.ResolveTokenAsync(effectiveToken).ConfigureAwait(false);
                     httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 }
 
-                ApplyDefaultHeaders(httpRequest);
+                ApplyDefaultHeaders(httpRequest, includeDefaultHeaders: !isExternalStorage);
 
                 try
                 {
@@ -437,7 +439,7 @@ public sealed class XyoClient : IXyoClient
         }
     }
 
-    private void ApplyDefaultHeaders(HttpRequestMessage request, string? correlationId = null, string? traceparent = null)
+    private void ApplyDefaultHeaders(HttpRequestMessage request, string? correlationId = null, string? traceparent = null, bool includeDefaultHeaders = true)
     {
         string? effectiveCorrelationId = !string.IsNullOrWhiteSpace(correlationId) ? correlationId : _config.CorrelationId;
         if (!string.IsNullOrWhiteSpace(effectiveCorrelationId))
@@ -464,11 +466,14 @@ public sealed class XyoClient : IXyoClient
             }
         }
 
-        foreach (var (key, value) in _config.DefaultHeaders)
+        if (includeDefaultHeaders)
         {
-            if (!request.Headers.NonValidated.Contains(key))
+            foreach (var (key, value) in _config.DefaultHeaders)
             {
-                request.Headers.TryAddWithoutValidation(key, value);
+                if (!request.Headers.NonValidated.Contains(key))
+                {
+                    request.Headers.TryAddWithoutValidation(key, value);
+                }
             }
         }
     }

@@ -23,6 +23,7 @@ public sealed record XyoClientConfig
     private readonly string? _apiKey;
     private string? _traceparent;
     private string _baseUrl = NormalizeBaseUrl(ResolveDefaultBaseUrl());
+    private IReadOnlyDictionary<string, string> _defaultHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Gets the static API token.
@@ -116,9 +117,15 @@ public sealed record XyoClientConfig
     public IReadOnlyList<string> TrustedDownloadHosts { get; init; } = Array.Empty<string>();
 
     /// <summary>
-    /// Gets custom default headers appended to outbound requests.
+    /// Gets custom default headers appended to outbound API requests. Not sent to external archive storage
+    /// hosts (see <see cref="Security.DownloadSecurityPolicy.IsExternalStorageHost"/>) for the same reason
+    /// the Bearer token is withheld from them.
     /// </summary>
-    public IReadOnlyDictionary<string, string> DefaultHeaders { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IReadOnlyDictionary<string, string> DefaultHeaders
+    {
+        get => _defaultHeaders;
+        init => _defaultHeaders = ValidateDefaultHeaders(value);
+    }
 
     /// <summary>
     /// Initializes a new instance of the <see cref="XyoClientConfig"/> class.
@@ -301,5 +308,28 @@ public sealed record XyoClientConfig
                string.Equals(host, "[::1]", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(host, "::1", StringComparison.OrdinalIgnoreCase) ||
                (IPAddress.TryParse(host.Trim('[', ']'), out var ip) && IPAddress.IsLoopback(ip));
+    }
+
+    /// <summary>
+    /// Validates every key/value in a candidate default-headers dictionary for CRLF injection (CWE-113).
+    /// <see cref="WithDefaultHeader"/> already validated the entry it adds; this closes the same gap for a
+    /// dictionary assigned directly through the <c>init</c> accessor (e.g. by <see cref="XyoClientOptions"/>).
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> ValidateDefaultHeaders(IReadOnlyDictionary<string, string> headers)
+    {
+        if (headers == null)
+        {
+            throw new ArgumentNullException(nameof(headers));
+        }
+
+        foreach (var (key, value) in headers)
+        {
+            if (CrlfRegex.IsMatch(key) || CrlfRegex.IsMatch(value))
+            {
+                throw new ArgumentException($"Default header '{key}' contains forbidden CRLF injection characters (CWE-113).", nameof(headers));
+            }
+        }
+
+        return headers;
     }
 }
