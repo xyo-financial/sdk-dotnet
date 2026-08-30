@@ -53,6 +53,13 @@ public sealed class XyoClientOptions
     public TimeSpan DownloadTimeout { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
+    /// Gets or sets the maximum cumulative time an archive transfer may spend waiting on the network across
+    /// all reads (default 1 hour). See <see cref="XyoClientConfig.MaxTotalDownloadDuration"/> for why the
+    /// per-read idle timeout alone does not bound the transfer as a whole.
+    /// </summary>
+    public TimeSpan MaxTotalDownloadDuration { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
     /// Gets or sets the maximum allowed download archive byte size for bulk processing (default 100 MiB).
     /// </summary>
     public long MaxArchiveBytes { get; set; } = 104_857_600;
@@ -97,6 +104,7 @@ public sealed class XyoClientOptions
             Traceparent = Traceparent,
             Timeout = Timeout,
             DownloadTimeout = DownloadTimeout,
+            MaxTotalDownloadDuration = MaxTotalDownloadDuration,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxDecompressedBytes = MaxDecompressedBytes,
             MaxEntryBytes = MaxEntryBytes,

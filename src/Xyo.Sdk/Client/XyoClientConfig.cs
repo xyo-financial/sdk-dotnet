@@ -96,6 +96,22 @@ public sealed record XyoClientConfig
     public TimeSpan DownloadTimeout { get; init; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
+    /// Gets the maximum cumulative time an archive transfer may spend waiting on the network, across all
+    /// reads (default 1 hour). Time the caller spends processing each yielded record is never counted, so
+    /// this bounds the transfer without penalising a slow consumer. Set to
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to disable.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="DownloadTimeout"/> resets on every read, so on its own it bounds nothing cumulative: a peer
+    /// delivering a few bytes just inside each idle window keeps the connection and the enumerating task
+    /// alive indefinitely, because no individual read ever stalls. The byte bounds
+    /// (<see cref="MaxArchiveBytes"/>, <see cref="MaxDecompressedBytes"/>, <see cref="MaxTarEntries"/>) do
+    /// not help either, since such a transfer is bounded in bytes and unbounded in time. This is the bound
+    /// that turns "a job that neither completes nor fails" into a job that fails.
+    /// </remarks>
+    public TimeSpan MaxTotalDownloadDuration { get; init; } = TimeSpan.FromHours(1);
+
+    /// <summary>
     /// Gets the maximum allowed download archive byte size for bulk processing (default 100 MiB).
     /// </summary>
     public long MaxArchiveBytes { get; init; } = 104_857_600; // 100 MiB

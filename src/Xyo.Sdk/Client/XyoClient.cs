@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -451,8 +452,16 @@ public sealed class XyoClient : IXyoClient
             await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
 
             using var responseStream = await response!.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            // leaveOpen because the `using` on `responseStream` above already owns its lifetime.
-            using var idleStream = new IdleTimeoutStream(responseStream, _config.DownloadTimeout, leaveOpen: true);
+            // DownloadTimeout is the per-read idle bound (it trips only when the peer stops sending);
+            // MaxTotalDownloadDuration bounds the cumulative time spent waiting on the network, so a peer
+            // that drips bytes just inside every idle window cannot hold the transfer open indefinitely.
+            // Neither counts the caller's own processing time between yielded records. leaveOpen because the
+            // `using` on `responseStream` above already owns its lifetime.
+            using var idleStream = new IdleTimeoutStream(
+                responseStream,
+                _config.DownloadTimeout,
+                _config.MaxTotalDownloadDuration,
+                leaveOpen: true);
 
             await foreach (var item in TarStreamReader.StreamArchiveAsync(
                 idleStream,
@@ -883,34 +892,50 @@ public sealed class XyoClient : IXyoClient
     }
 
     /// <summary>
-    /// Stream wrapper that enforces a per-read idle stall timeout without counting time spent by the caller
-    /// processing yielded records between reads. When an individual read stalls longer than <c>idleTimeout</c>,
-    /// it cancels the in-flight read and throws a typed <see cref="XyoNetworkException"/>.
+    /// Stream wrapper enforcing two independent bounds on an archive transfer, neither of which counts time
+    /// the caller spends processing yielded records between reads: an idle stall timeout, reset on every
+    /// read, which trips only when the peer stops sending; and a cumulative budget on total time spent
+    /// waiting on the network, which bounds the transfer as a whole even when every individual read
+    /// completes inside the idle window.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// The second bound exists because the first one alone bounds nothing cumulative: a peer that delivers a
+    /// few bytes just inside every idle window keeps the connection, the socket, and the enumerating task
+    /// alive indefinitely, since no single read ever stalls.
+    /// </para>
+    /// <para>
     /// Asynchronous reads only. <see cref="Stream.Read(byte[], int, int)"/> and
-    /// <see cref="Stream.Read(Span{byte})"/> accept no <see cref="CancellationToken"/>, so the timeout cannot
+    /// <see cref="Stream.Read(Span{byte})"/> accept no <see cref="CancellationToken"/>, so neither bound can
     /// be enforced on a synchronous read without abandoning a thread. They throw
     /// <see cref="NotSupportedException"/> rather than reading with no timeout at all behind an API that
     /// looks like it has one.
+    /// </para>
     /// </remarks>
     internal sealed class IdleTimeoutStream : Stream
     {
         private readonly Stream _inner;
         private readonly bool _leaveOpen;
         private readonly TimeSpan _idleTimeout;
+        private readonly TimeSpan _totalBudget;
+        private long _cumulativeReadTicks;
 
         /// <param name="inner">The stream to read through.</param>
         /// <param name="idleTimeout">Maximum time a single read may wait before it is treated as a stall.</param>
+        /// <param name="totalBudget">
+        /// Maximum cumulative time that may be spent waiting on <paramref name="inner"/> across all reads.
+        /// <see cref="Timeout.InfiniteTimeSpan"/> disables the bound.
+        /// </param>
         /// <param name="leaveOpen">
         /// When true (the default) disposing this stream does not dispose <paramref name="inner"/>. The
         /// wrapper is handed a stream it does not own, matching <c>BoundedReadStream</c> and the
         /// <c>leaveOpen: true</c> convention used by the rest of the archive pipeline.
         /// </param>
-        public IdleTimeoutStream(Stream inner, TimeSpan idleTimeout, bool leaveOpen = true)
+        public IdleTimeoutStream(Stream inner, TimeSpan idleTimeout, TimeSpan totalBudget, bool leaveOpen = true)
         {
             _inner = inner ?? throw new ArgumentNullException(nameof(inner));
             _idleTimeout = idleTimeout;
+            _totalBudget = totalBudget;
             _leaveOpen = leaveOpen;
         }
 
@@ -928,25 +953,51 @@ public sealed class XyoClient : IXyoClient
         public override Task FlushAsync(CancellationToken cancellationToken) => _inner.FlushAsync(cancellationToken);
 
         public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException(
-            "IdleTimeoutStream is asynchronous-only: a synchronous read cannot be bounded by the idle " +
-            "timeout. Use ReadAsync.");
+            "IdleTimeoutStream is asynchronous-only: a synchronous read cannot be bounded by the idle or " +
+            "total transfer timeout. Use ReadAsync.");
 
         public override int Read(Span<byte> buffer) => throw new NotSupportedException(
-            "IdleTimeoutStream is asynchronous-only: a synchronous read cannot be bounded by the idle " +
-            "timeout. Use ReadAsync.");
+            "IdleTimeoutStream is asynchronous-only: a synchronous read cannot be bounded by the idle or " +
+            "total transfer timeout. Use ReadAsync.");
 
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(_idleTimeout);
+
+            long start = Stopwatch.GetTimestamp();
             try
             {
-                return await _inner.ReadAsync(buffer, cts.Token).ConfigureAwait(false);
+                int read = await _inner.ReadAsync(buffer, cts.Token).ConfigureAwait(false);
+
+                // Accumulated on the success path only. The stall path below throws regardless, and adding to
+                // the budget from a finally block would let a budget violation replace the stall exception
+                // already propagating out.
+                _cumulativeReadTicks += Stopwatch.GetTimestamp() - start;
+                ThrowIfTotalBudgetExceeded();
+                return read;
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new XyoNetworkException(
                     $"Archive download stalled for more than {_idleTimeout.TotalSeconds} seconds.", ex);
+            }
+        }
+
+        private void ThrowIfTotalBudgetExceeded()
+        {
+            if (_totalBudget == Timeout.InfiniteTimeSpan)
+            {
+                return;
+            }
+
+            TimeSpan spentOnNetwork = Stopwatch.GetElapsedTime(0, _cumulativeReadTicks);
+            if (spentOnNetwork > _totalBudget)
+            {
+                throw new XyoNetworkException(
+                    $"Archive download exceeded the maximum total network transfer time of " +
+                    $"{_totalBudget.TotalSeconds} seconds (spent {spentOnNetwork.TotalSeconds:F1}s waiting on the peer). " +
+                    "Raise XyoClientConfig.MaxTotalDownloadDuration if archives of this size are expected to take longer.");
             }
         }
 

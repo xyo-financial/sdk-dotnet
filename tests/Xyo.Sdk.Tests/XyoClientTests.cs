@@ -906,17 +906,81 @@ public class XyoClientTests
     }
 
     [Fact]
+    public async Task StreamEnrichmentCollectionAsync_PeerDripsInsideEveryIdleWindow_TripsTotalDurationBound()
+    {
+        // The idle timeout resets on every read, so a peer delivering a few bytes just inside each window
+        // never stalls and, on its own, would hold the connection and the enumerating task open indefinitely
+        // (bounded in bytes by MaxArchiveBytes, unbounded in time). MaxTotalDownloadDuration is the bound
+        // that turns that into a failure rather than a job that never finishes.
+        var mockHandler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new SlowContinuousStream(TarGzOfRecords(4), TimeSpan.FromMilliseconds(60)))
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(mockHandler);
+        var config = new XyoClientConfig("xyo_test_token")
+        {
+            DownloadTimeout = TimeSpan.FromMilliseconds(500),         // no single read ever stalls
+            MaxTotalDownloadDuration = TimeSpan.FromMilliseconds(300) // but the total does run out
+        };
+        using var client = new XyoClient(config, httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+            {
+            }
+        });
+
+        Assert.Contains("maximum total network transfer time", ex.Message);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_SlowConsumer_DoesNotConsumeTotalDurationBudget()
+    {
+        // The total bound accumulates only time spent waiting on the network, so a caller that takes far
+        // longer than MaxTotalDownloadDuration to process the records it is handed must still succeed.
+        var mockHandler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(TarGzOfRecords(3))
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(mockHandler);
+        var config = new XyoClientConfig("xyo_test_token")
+        {
+            DownloadTimeout = TimeSpan.FromSeconds(5),
+            MaxTotalDownloadDuration = TimeSpan.FromMilliseconds(200)
+        };
+        using var client = new XyoClient(config, httpClient);
+
+        int received = 0;
+        await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+        {
+            received++;
+            await Task.Delay(150); // 450ms of consumer work against a 200ms network budget
+        }
+
+        Assert.Equal(3, received);
+    }
+
+    [Fact]
     public async Task IdleTimeoutStream_LeaveOpen_DoesNotDisposeAStreamItDoesNotOwn()
     {
         var inner = new DisposeCountingStream(new byte[] { 1, 2, 3, 4 });
 
-        var borrowed = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1), leaveOpen: true);
+        var borrowed = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan, leaveOpen: true);
         borrowed.Dispose();
         await borrowed.DisposeAsync();
 
         Assert.Equal(0, inner.DisposeCount);
 
-        var owning = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1), leaveOpen: false);
+        var owning = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan, leaveOpen: false);
         owning.Dispose();
 
         Assert.Equal(1, inner.DisposeCount);
@@ -967,7 +1031,7 @@ public class XyoClientTests
         // read. Failing loudly is the honest option; the alternative is an unbounded read behind an API
         // whose name promises a timeout.
         using var inner = new MemoryStream(new byte[] { 1, 2, 3, 4 });
-        using var stream = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1));
+        using var stream = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(10));
 
         Assert.Throws<NotSupportedException>(() => stream.Read(new byte[4], 0, 4));
         Assert.Throws<NotSupportedException>(() => stream.Read(new Span<byte>(new byte[4])));
