@@ -124,6 +124,32 @@ public class ApiContractTests
     }
 
     [Fact]
+    public async Task GetEnrichmentStatusAsync_SendsIdAsPathParameter()
+    {
+        // The specification declares GET /v1/ai/finance/enrichment/status/{id}. Nothing here
+        // asserted the request path before, which is why this SDK called an undeclared
+        // /transaction/collection/status?id= route unnoticed. See xyo-financial/specs#15.
+        using var client = ClientReturning(StatusJson, out var handler);
+
+        await client.GetEnrichmentStatusAsync("72c037df-d0d3-43ee-9470-323ff35a2e50");
+
+        var requestUri = handler.CapturedRequests[0].RequestUri!;
+        Assert.Equal("/v1/ai/finance/enrichment/status/72c037df-d0d3-43ee-9470-323ff35a2e50", requestUri.AbsolutePath);
+        Assert.Empty(requestUri.Query);
+    }
+
+    [Fact]
+    public async Task GetEnrichmentStatusAsync_EscapesSlashesInIdSoItCannotInjectPathSegments()
+    {
+        using var client = ClientReturning(StatusJson, out var handler);
+
+        await client.GetEnrichmentStatusAsync("abc/../../admin");
+
+        // The escaping must survive into the request, keeping the identifier one segment.
+        Assert.Contains("abc%2F..%2F..%2Fadmin", handler.CapturedRequests[0].RequestUri!.OriginalString);
+    }
+
+    [Fact]
     public async Task GetEnrichmentStatusAsync_NullCorrelationGuid_SendsNoCorrelationHeader()
     {
         using var client = ClientReturning(StatusJson, out var handler);

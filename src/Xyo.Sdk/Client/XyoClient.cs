@@ -313,12 +313,13 @@ public sealed class XyoClient : IXyoClient
 
         string token = await _config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
 
-        var uriBuilder = new UriBuilder($"{_config.BaseUrl}/v1/ai/finance/enrichment/transaction/collection/status")
-        {
-            Query = $"id={Uri.EscapeDataString(id.Trim())}"
-        };
+        // The specification declares GET /v1/ai/finance/enrichment/status/{id}, with the work
+        // identifier as a path parameter rather than a query value. EscapeDataString is the
+        // correct escape for a path segment: unlike a query value it also escapes '/', so an
+        // identifier containing a slash cannot inject additional path segments.
+        var statusUri = new Uri($"{_config.BaseUrl}/v1/ai/finance/enrichment/status/{Uri.EscapeDataString(id.Trim())}");
 
-        var httpRequest = new HttpRequestMessage(HttpMethod.Get, uriBuilder.Uri);
+        var httpRequest = new HttpRequestMessage(HttpMethod.Get, statusUri);
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
