@@ -226,8 +226,12 @@ public class XyoClientTests
         Assert.NotNull(result);
         Assert.Equal(EnrichmentCollectionStatusResponse.StatusEnum.READY, result.Status);
 
+        // The identifier belongs in the path, not the query: the specification declares
+        // GET /v1/ai/finance/enrichment/status/{id}. This previously asserted
+        // "id=batch_job_998877" in the query string, which locked in the wrong endpoint.
         var captured = handler.CapturedRequests[0];
-        Assert.Contains("id=batch_job_998877", captured.RequestUri?.Query);
+        Assert.Equal("/v1/ai/finance/enrichment/status/batch_job_998877", captured.RequestUri?.AbsolutePath);
+        Assert.Empty(captured.RequestUri?.Query!);
     }
 
     [Fact]
