@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -23,6 +24,7 @@ using Xyo.Sdk.Exceptions;
 using Xyo.Sdk.Internal;
 using Xyo.Sdk.Security;
 using Xyo.Sdk.Streaming;
+using Xyo.Sdk.Telemetry;
 
 namespace Xyo.Sdk.Client;
 
@@ -102,7 +104,6 @@ public sealed class XyoClient : IXyoClient
     // reader always observes either the previous ConfigState or the fully-constructed replacement, never a
     // torn mix of an old Config with a new SecurityPolicy (or vice versa). See OnOptionsChanged.
     private volatile ConfigState _state;
-
     private int _disposed; // 0 = not disposed, 1 = disposed; mutated only via Interlocked, see Dispose()
 
     /// <summary>
@@ -385,33 +386,55 @@ public sealed class XyoClient : IXyoClient
     /// <inheritdoc />
     public async Task<EnrichmentResponse> EnrichTransactionAsync(EnrichmentRequest request, string? correlationId, string? traceparent = null, CancellationToken cancellationToken = default)
     {
+        const string operationName = "EnrichTransaction";
         ThrowIfDisposed();
         if (request == null)
         {
             throw new ArgumentNullException(nameof(request));
         }
 
-        ValidateTransactionInput(request.Content, request.CountryCode, out string normalizedCountryCode);
-        var effectiveRequest = new EnrichmentRequest(request.Content, normalizedCountryCode);
-
-        // Snapshotted once, so a config reload landing mid-call cannot mix an old BaseUrl with a new
-        // Timeout (or vice versa) within the same request -- see ConfigState.
         ConfigState state = _state;
-        string token = await state.Config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
+        long startTimestamp = Stopwatch.GetTimestamp();
+        string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : state.Config.Traceparent;
+        using Activity? activity = StartClientActivity(operationName, effectiveTraceparent);
+        string? outboundTraceparent = activity?.Id;
 
-        var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{state.Config.BaseUrl}/v1/ai/finance/enrichment/transaction");
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        try
+        {
+            ValidateTransactionInput(request.Content, request.CountryCode, out string normalizedCountryCode);
+            var effectiveRequest = new EnrichmentRequest(request.Content, normalizedCountryCode);
 
-        ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent);
+            string token = await state.Config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
 
-        httpRequest.Content = JsonContent.Create(effectiveRequest, options: DefaultJsonOptions);
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{state.Config.BaseUrl}/v1/ai/finance/enrichment/transaction");
+            httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-        using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, state.Config, cancellationToken).ConfigureAwait(false);
-        await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
+            activity?.SetTag("http.request.method", "POST");
+            activity?.SetTag("server.address", httpRequest.RequestUri!.Host);
 
-        var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        return await DeserializeResponseAsync<EnrichmentResponse>(responseStream, response.StatusCode, "API server returned an empty payload.", cancellationToken).ConfigureAwait(false);
+            ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent, outboundTraceparent: outboundTraceparent);
+
+            httpRequest.Content = JsonContent.Create(effectiveRequest, options: DefaultJsonOptions);
+
+            using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, state.Config, cancellationToken).ConfigureAwait(false);
+            activity?.SetTag("http.response.status_code", XyoTelemetry.GetBoxedStatusCode(response.StatusCode));
+            await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
+
+            var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            var result = await DeserializeResponseAsync<EnrichmentResponse>(responseStream, response.StatusCode, "API server returned an empty payload.", cancellationToken).ConfigureAwait(false);
+
+            CompleteActivityStatus(activity, exception: null);
+            RecordRequestMetrics(operationName, startTimestamp, exception: null);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            CompleteActivityStatus(activity, ex);
+            RecordRequestMetrics(operationName, startTimestamp, ex);
+            LogOperationFailure(operationName, ex);
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -442,65 +465,91 @@ public sealed class XyoClient : IXyoClient
         string? traceparent = null,
         CancellationToken cancellationToken = default)
     {
+        const string operationName = "EnrichTransactions";
         ThrowIfDisposed();
         if (requests == null)
         {
             throw new ArgumentNullException(nameof(requests));
         }
 
-        var requestList = requests as IReadOnlyList<EnrichmentRequest> ?? requests.ToList();
-        if (requestList.Count == 0)
-        {
-            throw new ArgumentException("Transaction collection batch cannot be empty. Must contain between 1 and 50,000 items.", nameof(requests));
-        }
-        if (requestList.Count > 50_000)
-        {
-            throw new ArgumentException($"Transaction collection batch size of {requestList.Count} exceeds maximum limit of 50,000 items.", nameof(requests));
-        }
-
-        // Only materialises a copy on the first divergence between the input and its normalised form (e.g.
-        // a lowercase country code). For the common case where every item is already normalised, this avoids
-        // doubling peak managed heap with a second List plus up to 50,000 fresh EnrichmentRequest instances.
-        List<EnrichmentRequest>? effectiveList = null;
-        for (int i = 0; i < requestList.Count; i++)
-        {
-            var item = requestList[i];
-            if (item == null)
-            {
-                throw new ArgumentNullException(nameof(requests), $"Transaction item at index {i} cannot be null.");
-            }
-            ValidateTransactionInput(item.Content, item.CountryCode, out string normalized);
-            if (!string.Equals(normalized, item.CountryCode, StringComparison.Ordinal))
-            {
-                effectiveList ??= new List<EnrichmentRequest>(requestList);
-                effectiveList[i] = new EnrichmentRequest(item.Content, normalized);
-            }
-        }
-        IReadOnlyList<EnrichmentRequest> effective = effectiveList ?? requestList;
-
-        ValidateApiUser(apiUser);
-
         ConfigState state = _state;
-        string token = await state.Config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
+        long startTimestamp = Stopwatch.GetTimestamp();
+        string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : state.Config.Traceparent;
+        using Activity? activity = StartClientActivity(operationName, effectiveTraceparent);
+        string? outboundTraceparent = activity?.Id;
 
-        var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{state.Config.BaseUrl}/v1/ai/finance/enrichment/transactions");
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-
-        if (!string.IsNullOrWhiteSpace(apiUser))
+        try
         {
-            httpRequest.Headers.Add("x-api-user", apiUser.Trim());
+            var requestList = requests as IReadOnlyList<EnrichmentRequest> ?? requests.ToList();
+            if (requestList.Count == 0)
+            {
+                throw new ArgumentException("Transaction collection batch cannot be empty. Must contain between 1 and 50,000 items.", nameof(requests));
+            }
+            if (requestList.Count > 50_000)
+            {
+                throw new ArgumentException($"Transaction collection batch size of {requestList.Count} exceeds maximum limit of 50,000 items.", nameof(requests));
+            }
+
+            activity?.SetTag("xyo.sdk.batch.size", requestList.Count);
+
+            // Only materialises a copy on the first divergence between the input and its normalised form (e.g.
+            // a lowercase country code). For the common case where every item is already normalised, this avoids
+            // doubling peak managed heap with a second List plus up to 50,000 fresh EnrichmentRequest instances.
+            List<EnrichmentRequest>? effectiveList = null;
+            for (int i = 0; i < requestList.Count; i++)
+            {
+                var item = requestList[i];
+                if (item == null)
+                {
+                    throw new ArgumentNullException(nameof(requests), $"Transaction item at index {i} cannot be null.");
+                }
+                ValidateTransactionInput(item.Content, item.CountryCode, out string normalized);
+                if (!string.Equals(normalized, item.CountryCode, StringComparison.Ordinal))
+                {
+                    effectiveList ??= new List<EnrichmentRequest>(requestList);
+                    effectiveList[i] = new EnrichmentRequest(item.Content, normalized);
+                }
+            }
+            IReadOnlyList<EnrichmentRequest> effective = effectiveList ?? requestList;
+
+            ValidateApiUser(apiUser);
+
+            string token = await state.Config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
+
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{state.Config.BaseUrl}/v1/ai/finance/enrichment/transactions");
+            httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            if (!string.IsNullOrWhiteSpace(apiUser))
+            {
+                httpRequest.Headers.Add("x-api-user", apiUser.Trim());
+            }
+
+            activity?.SetTag("http.request.method", "POST");
+            activity?.SetTag("server.address", httpRequest.RequestUri!.Host);
+
+            ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent, outboundTraceparent: outboundTraceparent);
+
+            httpRequest.Content = JsonContent.Create(effective, options: DefaultJsonOptions);
+
+            using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, state.Config, cancellationToken).ConfigureAwait(false);
+            activity?.SetTag("http.response.status_code", XyoTelemetry.GetBoxedStatusCode(response.StatusCode));
+            await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
+
+            var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            var result = await DeserializeResponseAsync<EnrichTransactionCollectionResponse>(responseStream, response.StatusCode, "API server returned an empty batch response.", cancellationToken).ConfigureAwait(false);
+
+            CompleteActivityStatus(activity, exception: null);
+            RecordRequestMetrics(operationName, startTimestamp, exception: null);
+            return result;
         }
-
-        ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent);
-
-        httpRequest.Content = JsonContent.Create(effective, options: DefaultJsonOptions);
-
-        using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, state.Config, cancellationToken).ConfigureAwait(false);
-        await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
-
-        var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        return await DeserializeResponseAsync<EnrichTransactionCollectionResponse>(responseStream, response.StatusCode, "API server returned an empty batch response.", cancellationToken).ConfigureAwait(false);
+        catch (Exception ex)
+        {
+            CompleteActivityStatus(activity, ex);
+            RecordRequestMetrics(operationName, startTimestamp, ex);
+            LogOperationFailure(operationName, ex);
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -531,39 +580,63 @@ public sealed class XyoClient : IXyoClient
         string? traceparent = null,
         CancellationToken cancellationToken = default)
     {
+        const string operationName = "GetEnrichmentStatus";
         ThrowIfDisposed();
         if (string.IsNullOrWhiteSpace(id))
         {
             throw new ArgumentException("Enrichment job identifier cannot be null, empty, or whitespace.", nameof(id));
         }
 
-        ValidateApiUser(apiUser);
-
         ConfigState state = _state;
-        string token = await state.Config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
+        long startTimestamp = Stopwatch.GetTimestamp();
+        string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : state.Config.Traceparent;
+        using Activity? activity = StartClientActivity(operationName, effectiveTraceparent);
+        string? outboundTraceparent = activity?.Id;
 
-        // The specification declares GET /v1/ai/finance/enrichment/status/{id}, with the work
-        // identifier as a path parameter rather than a query value. EscapeDataString is the
-        // correct escape for a path segment: unlike a query value it also escapes '/', so an
-        // identifier containing a slash cannot inject additional path segments.
-        var statusUri = new Uri($"{state.Config.BaseUrl}/v1/ai/finance/enrichment/status/{Uri.EscapeDataString(id.Trim())}");
-
-        var httpRequest = new HttpRequestMessage(HttpMethod.Get, statusUri);
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-
-        if (!string.IsNullOrWhiteSpace(apiUser))
+        try
         {
-            httpRequest.Headers.Add("x-api-user", apiUser.Trim());
+            ValidateApiUser(apiUser);
+
+            string token = await state.Config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
+
+            // The specification declares GET /v1/ai/finance/enrichment/status/{id}, with the work
+            // identifier as a path parameter rather than a query value. EscapeDataString is the
+            // correct escape for a path segment: unlike a query value it also escapes '/', so an
+            // identifier containing a slash cannot inject additional path segments.
+            var statusUri = new Uri($"{state.Config.BaseUrl}/v1/ai/finance/enrichment/status/{Uri.EscapeDataString(id.Trim())}");
+
+            var httpRequest = new HttpRequestMessage(HttpMethod.Get, statusUri);
+            httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            if (!string.IsNullOrWhiteSpace(apiUser))
+            {
+                httpRequest.Headers.Add("x-api-user", apiUser.Trim());
+            }
+
+            activity?.SetTag("http.request.method", "GET");
+            activity?.SetTag("server.address", statusUri.Host);
+
+            ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent, outboundTraceparent: outboundTraceparent);
+
+            using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, state.Config, cancellationToken).ConfigureAwait(false);
+            activity?.SetTag("http.response.status_code", XyoTelemetry.GetBoxedStatusCode(response.StatusCode));
+            await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
+
+            var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            var result = await DeserializeResponseAsync<EnrichmentCollectionStatusResponse>(responseStream, response.StatusCode, "API server returned an empty status response.", cancellationToken).ConfigureAwait(false);
+
+            CompleteActivityStatus(activity, exception: null);
+            RecordRequestMetrics(operationName, startTimestamp, exception: null);
+            return result;
         }
-
-        ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent);
-
-        using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, state.Config, cancellationToken).ConfigureAwait(false);
-        await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
-
-        var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        return await DeserializeResponseAsync<EnrichmentCollectionStatusResponse>(responseStream, response.StatusCode, "API server returned an empty status response.", cancellationToken).ConfigureAwait(false);
+        catch (Exception ex)
+        {
+            CompleteActivityStatus(activity, ex);
+            RecordRequestMetrics(operationName, startTimestamp, ex);
+            LogOperationFailure(operationName, ex);
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -587,19 +660,82 @@ public sealed class XyoClient : IXyoClient
     /// </summary>
     internal const int MaxDownloadRedirects = 5;
 
+    /// <summary>
+    /// Mutable, single-writer progress recorded by <see cref="StreamEnrichmentCollectionCoreAsync"/> while it
+    /// runs, so the public <see cref="StreamEnrichmentCollectionAsync"/> wrapper can attach redirect-hop-count
+    /// and bytes-transferred telemetry to the operation's span, including on a failure partway through (e.g. a
+    /// stalled download reports the bytes read before it stalled).
+    /// </summary>
+    private sealed class StreamProgress
+    {
+        public int RedirectHopCount;
+        public IdleTimeoutStream? IdleStream;
+    }
+
     /// <inheritdoc />
+    /// <remarks>
+    /// Deliberately split into this thin, non-yielding wrapper and the <see cref="StreamEnrichmentCollectionCoreAsync"/>
+    /// iterator that does the actual work: a <c>yield return</c> is not allowed inside a <c>try</c> block that
+    /// has a <c>catch</c> clause, so recording span status and metrics on failure (which needs a <c>catch</c>)
+    /// has to live in a method that does not itself yield across that boundary. Manual enumeration here keeps
+    /// the `yield return` outside any try/catch while still observing every exception the core method raises.
+    /// </remarks>
     public async IAsyncEnumerable<EnrichmentResponse> StreamEnrichmentCollectionAsync(
         string downloadUrl,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        const string operationName = "StreamEnrichmentCollection";
         ThrowIfDisposed();
 
-        // Snapshotted once and used for the entire operation (every redirect hop, the download, and the
-        // decompression below), so a config reload landing mid-download cannot validate a redirect hop
-        // against a stale SecurityPolicy while enforcing a newer DownloadTimeout, or vice versa.
         ConfigState state = _state;
+        long startTimestamp = Stopwatch.GetTimestamp();
+        using Activity? activity = StartClientActivity(operationName, state.Config.Traceparent);
+        var statistics = new ArchiveTransferStatistics();
+        var progress = new StreamProgress();
+
+        await using var enumerator = StreamEnrichmentCollectionCoreAsync(downloadUrl, state, activity, statistics, progress, cancellationToken)
+            .GetAsyncEnumerator(cancellationToken);
+
+        while (true)
+        {
+            EnrichmentResponse current;
+            try
+            {
+                if (!await enumerator.MoveNextAsync().ConfigureAwait(false))
+                {
+                    break;
+                }
+                current = enumerator.Current;
+            }
+            catch (Exception ex)
+            {
+                CompleteStreamActivity(activity, ex, progress, statistics);
+                RecordRequestMetrics(operationName, startTimestamp, ex);
+                LogOperationFailure(operationName, ex);
+                throw;
+            }
+
+            yield return current;
+        }
+
+        CompleteStreamActivity(activity, exception: null, progress, statistics);
+        RecordRequestMetrics(operationName, startTimestamp, exception: null);
+    }
+
+    private async IAsyncEnumerable<EnrichmentResponse> StreamEnrichmentCollectionCoreAsync(
+        string downloadUrl,
+        ConfigState state,
+        Activity? activity,
+        ArchiveTransferStatistics statistics,
+        StreamProgress progress,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         Uri validatedUri = state.SecurityPolicy.ValidateDownloadUrl(downloadUrl);
         HttpResponseMessage? response = null;
+        string? outboundTraceparent = activity?.Id;
+
+        activity?.SetTag("http.request.method", "GET");
+        activity?.SetTag("server.address", validatedUri.Host);
 
         // DownloadConnectTimeout bounds only the connection/redirect phase (every redirect hop up to and
         // including receiving response headers), independently of both the shorter unary-call Timeout (see
@@ -612,6 +748,7 @@ public sealed class XyoClient : IXyoClient
         {
             for (int hop = 0; ; hop++)
             {
+                progress.RedirectHopCount = hop;
                 var httpRequest = new HttpRequestMessage(HttpMethod.Get, validatedUri);
                 httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/gzip"));
                 httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/x-tar"));
@@ -629,7 +766,7 @@ public sealed class XyoClient : IXyoClient
                     httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 }
 
-                ApplyDefaultHeaders(httpRequest, state.Config, includeInternalOnlyHeaders: !isExternalStorage);
+                ApplyDefaultHeaders(httpRequest, state.Config, includeInternalOnlyHeaders: !isExternalStorage, outboundTraceparent: outboundTraceparent);
 
                 try
                 {
@@ -664,6 +801,10 @@ public sealed class XyoClient : IXyoClient
                 // redirects to be followed before giving up on the next one.
                 if (hop >= MaxDownloadRedirects)
                 {
+                    if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
+                    {
+                        XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.bound", "max_redirects"));
+                    }
                     throw new XyoClientException(System.Net.HttpStatusCode.BadRequest,
                         $"Archive download exceeded the maximum of {MaxDownloadRedirects} redirects.");
                 }
@@ -674,11 +815,24 @@ public sealed class XyoClient : IXyoClient
 
                 // Re-run the full allowlist/scheme validation on the redirect target -- this is the control
                 // that stops a trusted host's 3xx from silently sending the client anywhere else (SSRF).
-                validatedUri = state.SecurityPolicy.ValidateDownloadUrl(nextUri.ToString());
+                try
+                {
+                    validatedUri = state.SecurityPolicy.ValidateDownloadUrl(nextUri.ToString());
+                }
+                catch (XyoClientException ex)
+                {
+                    if (XyoTelemetry.RedirectRefusedCount.Enabled)
+                    {
+                        XyoTelemetry.RedirectRefusedCount.Add(1);
+                    }
+                    _logger.LogWarning(ex, "Archive download redirect was refused by the egress allowlist.");
+                    throw;
+                }
             }
 
             try
             {
+                activity?.SetTag("http.response.status_code", XyoTelemetry.GetBoxedStatusCode(response!.StatusCode));
                 await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
@@ -700,21 +854,30 @@ public sealed class XyoClient : IXyoClient
             // that drips bytes just inside every idle window cannot hold the transfer open indefinitely.
             // Neither counts the caller's own processing time between yielded records. leaveOpen because the
             // `using` on `responseStream` above already owns its lifetime.
-            using var idleStream = new IdleTimeoutStream(
+            var idleStream = new IdleTimeoutStream(
                 responseStream,
                 state.Config.ReadIdleTimeout,
                 state.Config.MaxTotalDownloadDuration,
                 leaveOpen: true);
+            progress.IdleStream = idleStream;
 
-            await foreach (var item in TarStreamReader.StreamArchiveAsync(
-                idleStream,
-                state.Config.MaxArchiveBytes,
-                state.Config.MaxDecompressedBytes,
-                state.Config.MaxEntryBytes,
-                state.Config.MaxTarEntries,
-                cancellationToken).ConfigureAwait(false))
+            try
             {
-                yield return item;
+                await foreach (var item in TarStreamReader.StreamArchiveAsync(
+                    idleStream,
+                    state.Config.MaxArchiveBytes,
+                    state.Config.MaxDecompressedBytes,
+                    state.Config.MaxEntryBytes,
+                    state.Config.MaxTarEntries,
+                    statistics,
+                    cancellationToken).ConfigureAwait(false))
+                {
+                    yield return item;
+                }
+            }
+            finally
+            {
+                idleStream.Dispose();
             }
         }
         finally
@@ -738,7 +901,15 @@ public sealed class XyoClient : IXyoClient
     /// (e.g. an internal API key), neither of which should follow the request to a third party any more
     /// than the Bearer token does.
     /// </param>
-    private static void ApplyDefaultHeaders(HttpRequestMessage request, XyoClientConfig config, string? correlationId = null, string? traceparent = null, bool includeInternalOnlyHeaders = true)
+    /// <param name="outboundTraceparent">
+    /// The traceparent value actually placed on the wire when an effective traceparent (from
+    /// <paramref name="traceparent"/> or <see cref="XyoClientConfig.Traceparent"/>) is present. When an
+    /// <see cref="Activity"/> was started for this call, this is that activity's own W3C-formatted
+    /// <see cref="Activity.Id"/>, so the outbound request carries the SDK's own child span rather than
+    /// forwarding the caller-supplied parent id verbatim. Falls back to the effective traceparent unchanged
+    /// when null or blank (e.g. no <see cref="ActivityListener"/> is observing this source).
+    /// </param>
+    private static void ApplyDefaultHeaders(HttpRequestMessage request, XyoClientConfig config, string? correlationId = null, string? traceparent = null, bool includeInternalOnlyHeaders = true, string? outboundTraceparent = null)
     {
         if (!includeInternalOnlyHeaders)
         {
@@ -766,7 +937,8 @@ public sealed class XyoClient : IXyoClient
             }
             if (!request.Headers.NonValidated.Contains("traceparent"))
             {
-                request.Headers.TryAddWithoutValidation("traceparent", effectiveTraceparent);
+                string headerValue = !string.IsNullOrWhiteSpace(outboundTraceparent) ? outboundTraceparent : effectiveTraceparent;
+                request.Headers.TryAddWithoutValidation("traceparent", headerValue);
             }
         }
 
@@ -1090,6 +1262,155 @@ public sealed class XyoClient : IXyoClient
         }
     }
 
+    /// <summary>
+    /// Starts a client <see cref="Activity"/> for a public operation, parented to the trace carried by
+    /// <paramref name="effectiveTraceparent"/> when one is present and parseable. Returns <c>null</c>, with no
+    /// allocation, whenever nothing is listening to the <see cref="XyoTelemetry.ActivitySource"/> -- see
+    /// <see cref="XyoTelemetry"/>.
+    /// </summary>
+    private static Activity? StartClientActivity(string operationName, string? effectiveTraceparent)
+    {
+        if (!string.IsNullOrWhiteSpace(effectiveTraceparent) &&
+            ActivityContext.TryParse(effectiveTraceparent, traceState: null, out var parentContext))
+        {
+            return XyoTelemetry.ActivitySource.StartActivity(operationName, ActivityKind.Client, parentContext);
+        }
+
+        return XyoTelemetry.ActivitySource.StartActivity(operationName, ActivityKind.Client);
+    }
+
+    /// <summary>
+    /// Maps an operation's outcome to the low-cardinality <c>xyo.sdk.outcome</c> tag value shared by the
+    /// request counter, duration histogram, and structured log messages.
+    /// </summary>
+    private static string ClassifyOutcome(Exception? exception) => exception switch
+    {
+        null => "ok",
+        RateLimitException => "rate_limited",
+        OperationCanceledException => "cancelled",
+        XyoServerException => "server_error",
+        XyoClientException => "client_error",
+        XyoNetworkException => "network_error",
+        _ => "error"
+    };
+
+    /// <summary>
+    /// Sets the final <see cref="ActivityStatusCode"/> on a client span from the typed exception hierarchy, so
+    /// a <see cref="RateLimitException"/> is distinguishable from a <see cref="XyoNetworkException"/> in the
+    /// trace backend. <paramref name="exception"/>'s message is the only exception detail placed on the span,
+    /// and every message the SDK constructs is already free of credentials (see
+    /// <see cref="XyoClientConfig.ToString"/> and <see cref="LogSafeText"/>).
+    /// </summary>
+    private static void CompleteActivityStatus(Activity? activity, Exception? exception)
+    {
+        if (activity is null)
+        {
+            return;
+        }
+
+        if (exception is null)
+        {
+            activity.SetStatus(ActivityStatusCode.Ok);
+            return;
+        }
+
+        activity.SetStatus(ActivityStatusCode.Error, LogSafeText.Summarize(exception.Message));
+        activity.SetTag("error.type", exception.GetType().FullName);
+
+        if (exception is RateLimitException { RetryAfter: { } retryAfterSeconds })
+        {
+            activity.SetTag("xyo.sdk.rate_limit.retry_after_seconds", retryAfterSeconds);
+        }
+    }
+
+    /// <summary>
+    /// Completes a <see cref="StreamEnrichmentCollectionAsync"/> span: the SDK-specific attributes from the
+    /// proposed scope (archive entry count, bytes inflated, redirect hop count) plus, on failure, the raw
+    /// bytes transferred before the failure -- see <see cref="StreamProgress"/> and
+    /// <see cref="ArchiveTransferStatistics"/>.
+    /// </summary>
+    private static void CompleteStreamActivity(Activity? activity, Exception? exception, StreamProgress progress, ArchiveTransferStatistics statistics)
+    {
+        if (activity is not null)
+        {
+            activity.SetTag("xyo.sdk.download.redirect_hop_count", progress.RedirectHopCount);
+            activity.SetTag("xyo.sdk.archive.entry_count", statistics.EntryCount);
+            activity.SetTag("xyo.sdk.archive.bytes_inflated", statistics.InflatedBytes);
+            if (progress.IdleStream is not null)
+            {
+                activity.SetTag("xyo.sdk.download.bytes_transferred", progress.IdleStream.TotalBytesRead);
+            }
+        }
+
+        CompleteActivityStatus(activity, exception);
+    }
+
+    /// <summary>
+    /// Records the request counter and duration histogram (tagged by operation and outcome), plus the
+    /// rate-limit counter when the outcome was a <see cref="RateLimitException"/>. Every call is guarded by
+    /// the instrument's <c>Enabled</c> property, so nothing here allocates a tag list when no
+    /// <c>MeterListener</c> is observing <see cref="XyoTelemetry.Meter"/>.
+    /// </summary>
+    private static void RecordRequestMetrics(string operationName, long startTimestamp, Exception? exception)
+    {
+        string outcome = ClassifyOutcome(exception);
+
+        if (XyoTelemetry.RequestCount.Enabled || XyoTelemetry.RequestDuration.Enabled)
+        {
+            var tags = new TagList
+            {
+                { "xyo.sdk.operation", operationName },
+                { "xyo.sdk.outcome", outcome }
+            };
+
+            if (XyoTelemetry.RequestCount.Enabled)
+            {
+                XyoTelemetry.RequestCount.Add(1, tags);
+            }
+
+            if (XyoTelemetry.RequestDuration.Enabled)
+            {
+                XyoTelemetry.RequestDuration.Record(Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds, tags);
+            }
+        }
+
+        if (exception is RateLimitException && XyoTelemetry.RateLimitCount.Enabled)
+        {
+            XyoTelemetry.RateLimitCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.operation", operationName));
+        }
+    }
+
+    /// <summary>
+    /// Logs an operation failure through the optional <see cref="XyoClientConfig.LoggerFactory"/> (a
+    /// no-op <c>NullLogger</c> by default). Only the operation name, exception type, and exception message
+    /// reach the log record; none of those ever contain the API key or the raw Authorization header.
+    /// </summary>
+    private void LogOperationFailure(string operationName, Exception exception)
+    {
+        switch (exception)
+        {
+            case RateLimitException rateLimitException:
+                _logger.LogWarning(
+                    "XYO SDK operation {Operation} was rate limited; retry after {RetryAfterSeconds}s.",
+                    operationName, rateLimitException.RetryAfter);
+                break;
+            case XyoNetworkException:
+                _logger.LogWarning(exception, "XYO SDK operation {Operation} failed with a network error.", operationName);
+                break;
+            case XyoServerException:
+                _logger.LogError(exception, "XYO SDK operation {Operation} failed with an upstream server error.", operationName);
+                break;
+            case XyoClientException:
+                _logger.LogWarning(exception, "XYO SDK operation {Operation} failed with a client error.", operationName);
+                break;
+            case OperationCanceledException:
+                break;
+            default:
+                _logger.LogError(exception, "XYO SDK operation {Operation} failed unexpectedly.", operationName);
+                break;
+        }
+    }
+
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -1145,6 +1466,14 @@ public sealed class XyoClient : IXyoClient
         private readonly TimeSpan _idleTimeout;
         private readonly TimeSpan _totalBudget;
         private long _cumulativeReadTicks;
+        private long _totalBytesRead;
+
+        /// <summary>
+        /// Total bytes read through this wrapper so far, exposed so telemetry can record how much of an
+        /// archive transferred before a stall or budget failure (see
+        /// <see cref="XyoClient.CompleteStreamActivity"/>).
+        /// </summary>
+        internal long TotalBytesRead => _totalBytesRead;
 
         /// <param name="inner">The stream to read through.</param>
         /// <param name="idleTimeout">Maximum time a single read may wait before it is treated as a stall.</param>
@@ -1192,6 +1521,7 @@ public sealed class XyoClient : IXyoClient
             {
                 long start = Stopwatch.GetTimestamp();
                 int read = await _inner.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                _totalBytesRead += read;
                 _cumulativeReadTicks += Stopwatch.GetTimestamp() - start;
                 ThrowIfTotalBudgetExceeded();
                 return read;
@@ -1208,12 +1538,17 @@ public sealed class XyoClient : IXyoClient
                 // Accumulated on the success path only. The stall path below throws regardless, and adding to
                 // the budget from a finally block would let a budget violation replace the stall exception
                 // already propagating out.
+                _totalBytesRead += read;
                 _cumulativeReadTicks += Stopwatch.GetTimestamp() - startTimestamp;
                 ThrowIfTotalBudgetExceeded();
                 return read;
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
+                if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
+                {
+                    XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.bound", "idle_timeout"));
+                }
                 throw new XyoNetworkException(
                     $"Archive download read stalled: the peer did not produce further data within " +
                     $"{_idleTimeout.TotalSeconds} seconds.", ex);
@@ -1230,6 +1565,10 @@ public sealed class XyoClient : IXyoClient
             TimeSpan spentOnNetwork = Stopwatch.GetElapsedTime(0, _cumulativeReadTicks);
             if (spentOnNetwork > _totalBudget)
             {
+                if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
+                {
+                    XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.bound", "total_duration"));
+                }
                 throw new XyoNetworkException(
                     $"Archive download exceeded the maximum total network transfer time of " +
                     $"{_totalBudget.TotalSeconds} seconds (spent {spentOnNetwork.TotalSeconds:F1}s waiting on the peer). " +

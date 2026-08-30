@@ -180,7 +180,6 @@ public static class ServiceCollectionExtensions
         {
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             var httpClient = httpClientFactory.CreateClient(HttpClientName);
-
             // Container ILoggerFactory fallback: applied only when the caller has not explicitly configured
             // one on config (see XyoClientConfig.IsLoggerFactoryExplicit).
             var effectiveConfig = config;
@@ -197,5 +196,22 @@ public static class ServiceCollectionExtensions
         });
 
         return builder;
+    }
+
+    /// <summary>
+    /// Wires the container's registered <see cref="ILoggerFactory"/> into <paramref name="config"/> when the
+    /// caller has not already configured one of their own, so a DI-registered client logs through the
+    /// application's own logging pipeline without requiring every consumer to set
+    /// <see cref="XyoClientConfig.LoggerFactory"/> explicitly.
+    /// </summary>
+    private static XyoClientConfig ApplyDiLoggerFactory(XyoClientConfig config, IServiceProvider sp)
+    {
+        if (!ReferenceEquals(config.LoggerFactory, NullLoggerFactory.Instance))
+        {
+            return config;
+        }
+
+        var loggerFactory = sp.GetService<ILoggerFactory>();
+        return loggerFactory == null ? config : config with { LoggerFactory = loggerFactory };
     }
 }

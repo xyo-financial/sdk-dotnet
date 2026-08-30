@@ -376,6 +376,31 @@ catch (XyoNetworkException ex)
 
 ---
 
+## 📡 Observability with OpenTelemetry
+
+The SDK ships first-class OpenTelemetry instrumentation with no external dependency: a single `ActivitySource` for distributed tracing and a single `Meter` for metrics, both named **`Xyo.Sdk`** and versioned with the assembly.
+
+- **Tracing:** one client span per public operation (`EnrichTransaction`, `EnrichTransactions`, `GetEnrichmentStatus`, `StreamEnrichmentCollection`), carrying HTTP semantic-convention attributes (`http.request.method`, `server.address`, `http.response.status_code`) plus SDK-specific attributes (batch size, archive entry count, bytes inflated, redirect hop count). Span status is derived from the typed exception hierarchy, so a `RateLimitException` is distinguishable from a `XyoNetworkException` in the trace backend. A caller-supplied `traceparent` becomes the span's parent, and the SDK's own child span (not the caller's raw id) is what goes out on the wire.
+- **Metrics:** a request counter and duration histogram tagged by operation and outcome, plus counters for rate-limit responses, refused download redirects, and every download safety bound that can trip (archive bytes, decompressed bytes, entry bytes, entry count, idle timeout, total duration, redirect count).
+- **Logging:** an optional `ILoggerFactory` on `XyoClientConfig` (defaults to a no-op `NullLoggerFactory`) surfaces rate limiting, refused redirects, and operation failures through the host application's own logging pipeline. A DI-registered client (`AddXyoClient`) picks up the container's `ILoggerFactory` automatically.
+
+Every instrument is inert until something listens: no `Activity` is allocated, and no metric tag list is built, unless a listener is registered against the `Xyo.Sdk` source or meter. No span attribute, metric tag, or log message ever contains the API key.
+
+### Minimal Registration Example
+
+```csharp
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing.AddSource("Xyo.Sdk").AddOtlpExporter())
+    .WithMetrics(metrics => metrics.AddMeter("Xyo.Sdk").AddOtlpExporter());
+```
+
+---
+
 ## 🔒 Security & Defensive Architecture
 
 - **Zero-Trust Domain Egress Allowlist:** Validates all archive download URLs against pinned official domains (`api.xyo.financial`, `download.xyo.financial`, AWS S3 storage hosts) and strictly rejects cleartext HTTP.

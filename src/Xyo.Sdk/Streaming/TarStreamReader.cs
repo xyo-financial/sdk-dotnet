@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Xyo.Generated.Model;
 using Xyo.Sdk.Client;
 using Xyo.Sdk.Exceptions;
+using Xyo.Sdk.Telemetry;
 
 namespace Xyo.Sdk.Streaming;
 
@@ -35,7 +36,7 @@ public static class TarStreamReader
         CancellationToken cancellationToken = default)
     {
         var results = new List<EnrichmentResponse>();
-        await foreach (var item in StreamArchiveAsync(compressedStream, maxArchiveBytes, maxDecompressedBytes, maxEntryBytes, maxTarEntries, cancellationToken).ConfigureAwait(false))
+        await foreach (var item in StreamArchiveAsync(compressedStream, maxArchiveBytes, maxDecompressedBytes, maxEntryBytes, maxTarEntries, statistics: null, cancellationToken).ConfigureAwait(false))
         {
             results.Add(item);
         }
@@ -51,6 +52,7 @@ public static class TarStreamReader
         long maxDecompressedBytes = 2_097_152_000,
         long maxEntryBytes = 10_485_760,
         int maxTarEntries = 50_000,
+        ArchiveTransferStatistics? statistics = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (compressedStream == null)
@@ -97,8 +99,17 @@ public static class TarStreamReader
             }
 
             entryCount++;
+            if (statistics != null)
+            {
+                statistics.EntryCount = entryCount;
+                statistics.InflatedBytes = inflatedStream.TotalBytesRead;
+            }
             if (entryCount > maxTarEntries)
             {
+                if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
+                {
+                    XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.bound", "max_tar_entries"));
+                }
                 throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
                     $"Tar archive exceeds maximum entry count limit ({maxTarEntries} entries). Possible tar bomb DoS attack.");
             }
@@ -152,6 +163,10 @@ public static class TarStreamReader
 
             if (response != null)
             {
+                if (statistics != null)
+                {
+                    statistics.InflatedBytes = inflatedStream.TotalBytesRead;
+                }
                 yield return response;
             }
         }
@@ -198,6 +213,13 @@ public static class TarStreamReader
             _entryName = entryName;
             _boundLabel = boundLabel;
         }
+
+        /// <summary>
+        /// Total bytes read through this wrapper so far, exposed so a caller can attach a byte count to
+        /// telemetry even when the stream is still short of <see cref="_maxBytes"/> (e.g. progress recorded
+        /// before an unrelated failure elsewhere in the pipeline).
+        /// </summary>
+        internal long TotalBytesRead => _totalBytesRead;
 
         public override bool CanRead => _innerStream.CanRead;
         public override bool CanSeek => false;
@@ -256,6 +278,19 @@ public static class TarStreamReader
 
         private void ThrowMaxBytesExceeded()
         {
+            if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
+            {
+                string bound = !string.IsNullOrWhiteSpace(_entryName)
+                    ? "max_entry_bytes"
+                    : _boundLabel switch
+                    {
+                        "download wire size" => "max_archive_bytes",
+                        "decompressed content size" => "max_decompressed_bytes",
+                        _ => "max_archive_bytes"
+                    };
+                XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.bound", bound));
+            }
+
             if (!string.IsNullOrWhiteSpace(_entryName))
             {
                 throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
