@@ -10,6 +10,22 @@ public class XyoClientConfigTests
     private const string EnvVarName = "XYO_API_BASE_URL";
 
     [Fact]
+    public void DefaultHeaders_CrlfInValueViaInit_Throws()
+    {
+        var headers = new Dictionary<string, string> { ["X-Tenant"] = "ok\r\nX-Injected: pwned" };
+        var ex = Assert.Throws<ArgumentException>(() => new XyoClientConfig("key") { DefaultHeaders = headers });
+        Assert.Contains("CRLF injection", ex.Message);
+    }
+
+    [Fact]
+    public void DefaultHeaders_CrlfInKeyViaInit_Throws()
+    {
+        var headers = new Dictionary<string, string> { ["X-Tenant\r\nX-Injected"] = "pwned" };
+        var ex = Assert.Throws<ArgumentException>(() => new XyoClientConfig("key") { DefaultHeaders = headers });
+        Assert.Contains("CRLF injection", ex.Message);
+    }
+
+    [Fact]
     public void Construction_ExplicitBaseUrl_NotPreemptedByInvalidEnvironmentVariable()
     {
         string? original = Environment.GetEnvironmentVariable(EnvVarName);
