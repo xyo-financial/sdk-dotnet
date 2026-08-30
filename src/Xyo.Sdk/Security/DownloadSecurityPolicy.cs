@@ -8,7 +8,7 @@ namespace Xyo.Sdk.Security;
 /// <summary>
 /// Enforces Zero-Trust egress domain validation (CWE-183) and Server-Side Request Forgery (SSRF) defense on archive downloads.
 /// </summary>
-public class DownloadSecurityPolicy
+public sealed class DownloadSecurityPolicy
 {
     private static readonly HashSet<string> DefaultTrustedHosts = new(StringComparer.OrdinalIgnoreCase)
     {

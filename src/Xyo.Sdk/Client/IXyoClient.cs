@@ -9,6 +9,12 @@ namespace Xyo.Sdk.Client;
 /// <summary>
 /// Primary interface for interacting with the XYO Financial AI Transaction Enrichment API.
 /// </summary>
+/// <remarks>
+/// Thread-safe. <see cref="XyoClient"/> holds only immutable configuration and a shared
+/// <see cref="System.Net.Http.HttpClient"/>, so a single instance is safe to register as a singleton and
+/// share across concurrent requests -- the recommended usage, and how <c>AddXyoClient</c> registers it in
+/// dependency injection.
+/// </remarks>
 public interface IXyoClient : IDisposable
 {
     /// <summary>

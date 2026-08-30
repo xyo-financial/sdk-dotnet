@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using Xyo.Sdk.Internal;
 
 namespace Xyo.Sdk.Exceptions;
 
@@ -111,7 +112,11 @@ public class XyoProblemDetailsException : XyoClientException
         }
         catch
         {
-            string sanitized = jsonPayload.Length > 512 ? jsonPayload.Substring(0, 512) + "..." : jsonPayload;
+            // Reached whenever the body is not parseable JSON despite a JSON content type, which is exactly
+            // the malformed-or-hostile upstream case: a proxy HTML error page, a truncated response. The
+            // payload therefore gets the same treatment as every other message built from a response body,
+            // rather than being substring'd raw into a log line.
+            string sanitized = LogSafeText.Summarize(jsonPayload);
             return new XyoProblemDetailsException(statusCode, $"[HTTP {(int)statusCode}] {sanitized}", rawResponseBody: jsonPayload, innerException: innerException);
         }
     }

@@ -81,4 +81,98 @@ public class ProblemDetailsTests
         Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
         Assert.True(ex.IsRetryable());
     }
+
+    [Fact]
+    public void FromJson_UnparseableBody_FlattensControlCharactersInMessage()
+    {
+        // The fallback fires when the body is not parseable JSON despite a JSON content type, which is
+        // precisely the malformed-or-hostile upstream case (a proxy HTML error page, a truncated response).
+        // Before this was shared with SafeSummary, that path substring'd the payload straight into
+        // Exception.Message, so ESC, NUL and U+2028 all reached the log intact (CWE-117).
+        const char esc = '\u001b';
+        const char lineSeparator = '\u2028';
+        string hostile = $"not json{esc}[31mANSI\n2026-08-30 INFO forged line{lineSeparator}sep\0nul";
+
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, hostile);
+
+        Assert.DoesNotContain(esc, ex.Message);
+        Assert.DoesNotContain('\n', ex.Message);
+        Assert.DoesNotContain('\r', ex.Message);
+        Assert.DoesNotContain(lineSeparator, ex.Message);
+        Assert.DoesNotContain('\0', ex.Message);
+
+        // Full fidelity is still available for callers that opt in.
+        Assert.Equal(hostile, ex.RawResponseBody);
+    }
+
+    [Fact]
+    public void FromJson_UnparseableBodyStraddlingTheClamp_DoesNotEmitLoneSurrogate()
+    {
+        // A surrogate pair positioned so a naive Substring(0, 512) would split it.
+        string hostile = new string('B', 511) + "\U0001F600" + "tail";
+
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, hostile);
+
+        string trimmed = ex.Message.TrimEnd('\u2026');
+        Assert.False(char.IsSurrogate(trimmed[^1]), "clamped message must not end in a lone surrogate");
+    }
+
+    [Fact]
+    public void FromJson_TitleOnly_UsesTitleAsTheMessage()
+    {
+        // RFC 7807 makes every member optional. With no "detail", the message falls back to "title".
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, @"{ ""title"": ""Validation failed"" }");
+
+        Assert.Equal("Validation failed", ex.Message);
+        Assert.Equal("Validation failed", ex.Title);
+        Assert.Null(ex.Detail);
+    }
+
+    [Fact]
+    public void FromJson_NeitherDetailNorTitle_FallsBackToStatusLine()
+    {
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, @"{ ""type"": ""about:blank"" }");
+
+        Assert.Contains("[HTTP 400]", ex.Message);
+        Assert.Equal("about:blank", ex.Type);
+        Assert.Null(ex.Title);
+        Assert.Null(ex.Detail);
+    }
+
+    [Fact]
+    public void FromJson_ErrorsAsScalarStrings_AreWrappedIntoSingleElementArrays()
+    {
+        // ASP.NET Core emits arrays, but other stacks emit a bare string per field. Both must land in the
+        // same shape so a caller reading Errors does not have to branch on the server's dialect.
+        string payload = @"{ ""title"": ""Invalid"", ""errors"": { ""countryCode"": ""must be ISO 3166-1 alpha-2"" } }";
+
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, payload);
+
+        Assert.NotNull(ex.Errors);
+        Assert.Equal(new[] { "must be ISO 3166-1 alpha-2" }, ex.Errors!["countryCode"]);
+    }
+
+    [Fact]
+    public void FromJson_ErrorsWithUnsupportedValueKind_IsIgnoredRatherThanThrowing()
+    {
+        // A numeric or object value under "errors" is neither an array nor a string. It must be skipped so
+        // one unexpected field cannot cost the caller the rest of a parseable problem document.
+        string payload = @"{ ""title"": ""Invalid"", ""errors"": { ""retries"": 3, ""countryCode"": [""required""] } }";
+
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, payload);
+
+        Assert.NotNull(ex.Errors);
+        Assert.False(ex.Errors!.ContainsKey("retries"));
+        Assert.Equal(new[] { "required" }, ex.Errors["countryCode"]);
+    }
+
+    [Fact]
+    public void FromJson_ErrorsArrayWithNonStringElements_KeepsOnlyTheStrings()
+    {
+        string payload = @"{ ""title"": ""Invalid"", ""errors"": { ""content"": [""too long"", 42, null] } }";
+
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, payload);
+
+        Assert.Equal(new[] { "too long" }, ex.Errors!["content"]);
+    }
 }

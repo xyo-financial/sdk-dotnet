@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Http;
@@ -19,6 +20,7 @@ public class DependencyInjectionTests
 
         Assert.NotNull(builder);
         Assert.Equal(ServiceCollectionExtensions.HttpClientName, builder.Name);
+        Assert.Equal(ServiceLifetime.Singleton, services.Single(d => d.ServiceType == typeof(IXyoClient)).Lifetime);
 
         using var serviceProvider = services.BuildServiceProvider();
         var client = serviceProvider.GetRequiredService<IXyoClient>();
@@ -45,6 +47,7 @@ public class DependencyInjectionTests
 
         Assert.NotNull(builder);
         Assert.Equal(ServiceCollectionExtensions.HttpClientName, builder.Name);
+        Assert.Equal(ServiceLifetime.Singleton, services.Single(d => d.ServiceType == typeof(IXyoClient)).Lifetime);
 
         using var serviceProvider = services.BuildServiceProvider();
         var client = serviceProvider.GetRequiredService<IXyoClient>();
@@ -70,6 +73,7 @@ public class DependencyInjectionTests
 
         Assert.NotNull(builder);
         Assert.Equal(ServiceCollectionExtensions.HttpClientName, builder.Name);
+        Assert.Equal(ServiceLifetime.Singleton, services.Single(d => d.ServiceType == typeof(IXyoClient)).Lifetime);
 
         using var serviceProvider = services.BuildServiceProvider();
         var client = serviceProvider.GetRequiredService<IXyoClient>();

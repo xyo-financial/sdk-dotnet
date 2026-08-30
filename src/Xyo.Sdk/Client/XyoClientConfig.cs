@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,17 +11,25 @@ namespace Xyo.Sdk.Client;
 /// <summary>
 /// Immutable configuration options for initializing the XYO Financial SDK client.
 /// </summary>
-public sealed class XyoClientConfig
+public sealed record XyoClientConfig
 {
     private const string DefaultProductionUrl = "https://api.xyo.financial";
     private static readonly Regex CrlfRegex = new(@"[\r\n]", RegexOptions.Compiled);
     private static readonly Regex TraceparentRegex = new(
-        @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+        @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\z",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string? _apiKey;
     private string? _traceparent;
+    // Deliberately NOT validated here: this field initializer runs on every construction, before an
+    // explicit `BaseUrl = ...` in an object initializer is applied. Validating eagerly would mean an
+    // invalid XYO_API_BASE_URL breaks construction even when the caller overrides BaseUrl explicitly.
+    // The env-var-derived default is validated lazily instead, by XyoClient's constructor, at the point
+    // where we know definitively whether an override was supplied.
+    private string _baseUrl = ResolveDefaultBaseUrl();
+    private IReadOnlyDictionary<string, string> _defaultHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<string> _trustedDownloadHosts = Array.Empty<string>();
 
     /// <summary>
     /// Gets the static API token.
@@ -30,12 +39,25 @@ public sealed class XyoClientConfig
     /// <summary>
     /// Gets the dynamic asynchronous API key supplier delegate (for secrets managers and token rotation).
     /// </summary>
+    /// <remarks>
+    /// Invoked on every request that needs a token (no internal caching). If the supplier calls out to a
+    /// secrets manager or token service, it must cache/memoize its own result with an appropriate expiry --
+    /// otherwise every enrichment call pays that round trip, and at batch throughput that round trip becomes
+    /// both a latency multiplier and a throttling risk against the secrets service.
+    /// </remarks>
     public Func<CancellationToken, Task<string>>? ApiKeySupplier { get; init; }
 
     /// <summary>
-    /// Gets the target API base URL (e.g. https://api.xyo.financial or sandbox).
+    /// Gets the target API base URL (e.g. https://api.xyo.financial or sandbox). Must be an absolute HTTPS
+    /// URI; plain HTTP is only accepted for loopback hosts, since the Bearer token would otherwise be sent
+    /// in cleartext. Validated on every construction path, including <c>init</c> (e.g. binding from
+    /// <c>appsettings.json</c> via <see cref="XyoClientOptions"/>), not just <see cref="WithBaseUrl"/>.
     /// </summary>
-    public string BaseUrl { get; init; } = ResolveDefaultBaseUrl();
+    public string BaseUrl
+    {
+        get => _baseUrl;
+        init => _baseUrl = NormalizeBaseUrl(value);
+    }
 
     /// <summary>
     /// Gets the optional distributed tracing correlation identifier attached to requests (X-Correlation-ID).
@@ -57,14 +79,50 @@ public sealed class XyoClientConfig
     }
 
     /// <summary>
-    /// Gets the HTTP request timeout duration.
+    /// Gets the timeout duration for a single unary API call (enrichment, batch submit, status lookup).
+    /// Enforced independently per call via a linked cancellation token; does not bound archive downloads,
+    /// see <see cref="DownloadTimeout"/>.
     /// </summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Gets the timeout duration for archive download and stream processing
+    /// (<see cref="Xyo.Sdk.Client.IXyoClient.StreamEnrichmentCollectionAsync"/> /
+    /// <see cref="Xyo.Sdk.Client.IXyoClient.DownloadEnrichmentCollectionAsync"/>).
+    /// Enforces a deadline on initial HTTP connection/redirects, and serves as an idle stall timeout
+    /// between network reads during stream processing. Kept independent of <see cref="Timeout"/> because a
+    /// multi-hundred-MB archive legitimately needs far longer than a single unary call.
+    /// </summary>
+    public TimeSpan DownloadTimeout { get; init; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Gets the maximum cumulative time an archive transfer may spend waiting on the network, across all
+    /// reads (default 1 hour). Time the caller spends processing each yielded record is never counted, so
+    /// this bounds the transfer without penalising a slow consumer. Set to
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to disable.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="DownloadTimeout"/> resets on every read, so on its own it bounds nothing cumulative: a peer
+    /// delivering a few bytes just inside each idle window keeps the connection and the enumerating task
+    /// alive indefinitely, because no individual read ever stalls. The byte bounds
+    /// (<see cref="MaxArchiveBytes"/>, <see cref="MaxDecompressedBytes"/>, <see cref="MaxTarEntries"/>) do
+    /// not help either, since such a transfer is bounded in bytes and unbounded in time. This is the bound
+    /// that turns "a job that neither completes nor fails" into a job that fails.
+    /// </remarks>
+    public TimeSpan MaxTotalDownloadDuration { get; init; } = TimeSpan.FromHours(1);
 
     /// <summary>
     /// Gets the maximum allowed download archive byte size for bulk processing (default 100 MiB).
     /// </summary>
     public long MaxArchiveBytes { get; init; } = 104_857_600; // 100 MiB
+
+    /// <summary>
+    /// Gets the maximum total decompressed byte count allowed while inflating an archive (default 2000 MiB,
+    /// a 20:1 ratio over <see cref="MaxArchiveBytes"/>). <see cref="MaxArchiveBytes"/> only bounds bytes read
+    /// off the wire, before decompression; this bounds the expansion itself, which is what a decompression
+    /// bomb (CWE-400) actually attacks.
+    /// </summary>
+    public long MaxDecompressedBytes { get; init; } = 2_097_152_000; // 2000 MiB
 
     /// <summary>
     /// Gets the maximum allowed decompressed size per TAR entry (default 10 MiB).
@@ -79,12 +137,24 @@ public sealed class XyoClientConfig
     /// <summary>
     /// Gets the list of additional trusted corporate storage hosts for Zero-Trust download validation.
     /// </summary>
-    public IReadOnlyList<string> TrustedDownloadHosts { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> TrustedDownloadHosts
+    {
+        get => _trustedDownloadHosts;
+        init => _trustedDownloadHosts = value == null
+            ? throw new ArgumentNullException(nameof(value))
+            : new List<string>(value);
+    }
 
     /// <summary>
-    /// Gets custom default headers appended to outbound requests.
+    /// Gets custom default headers appended to outbound API requests. Not sent to external archive storage
+    /// hosts (see <see cref="Security.DownloadSecurityPolicy.IsExternalStorageHost"/>) for the same reason
+    /// the Bearer token is withheld from them.
     /// </summary>
-    public IReadOnlyDictionary<string, string> DefaultHeaders { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IReadOnlyDictionary<string, string> DefaultHeaders
+    {
+        get => _defaultHeaders;
+        init => _defaultHeaders = ValidateDefaultHeaders(value);
+    }
 
     /// <summary>
     /// Initializes a new instance of the <see cref="XyoClientConfig"/> class.
@@ -119,22 +189,8 @@ public sealed class XyoClientConfig
     /// <summary>
     /// Sets a dynamic asynchronous token supplier delegate.
     /// </summary>
-    public XyoClientConfig WithTokenSupplier(Func<CancellationToken, Task<string>> supplier)
-    {
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = supplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = CorrelationId,
-            Traceparent = Traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
-        };
-    }
+    public XyoClientConfig WithTokenSupplier(Func<CancellationToken, Task<string>> supplier) =>
+        this with { ApiKeySupplier = supplier };
 
     /// <summary>
     /// Sets a synchronous dynamic token supplier delegate.
@@ -145,29 +201,9 @@ public sealed class XyoClientConfig
     }
 
     /// <summary>
-    /// Sets the target API base URL.
+    /// Sets the target API base URL. Validation is centralized in the <see cref="BaseUrl"/> init accessor.
     /// </summary>
-    public XyoClientConfig WithBaseUrl(string baseUrl)
-    {
-        if (string.IsNullOrWhiteSpace(baseUrl))
-        {
-            throw new ArgumentException("Base URL cannot be null or empty.", nameof(baseUrl));
-        }
-
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = baseUrl.TrimEnd('/'),
-            CorrelationId = CorrelationId,
-            Traceparent = Traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
-        };
-    }
+    public XyoClientConfig WithBaseUrl(string baseUrl) => this with { BaseUrl = baseUrl };
 
     /// <summary>
     /// Attaches a distributed tracing correlation ID header (X-Correlation-ID).
@@ -179,19 +215,7 @@ public sealed class XyoClientConfig
             throw new ArgumentException("Correlation ID contains illegal CRLF injection characters.", nameof(correlationId));
         }
 
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = correlationId,
-            Traceparent = Traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
-        };
+        return this with { CorrelationId = correlationId };
     }
 
     /// <summary>
@@ -213,60 +237,26 @@ public sealed class XyoClientConfig
             throw new ArgumentException("Traceparent header does not conform to the W3C TraceContext format (version-traceid-parentid-flags).", nameof(traceparent));
         }
 
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = CorrelationId,
-            Traceparent = traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
-        };
+        return this with { Traceparent = traceparent };
     }
 
     /// <summary>
     /// Configures the HTTP request timeout duration.
     /// </summary>
-    public XyoClientConfig WithTimeout(TimeSpan timeout)
-    {
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = CorrelationId,
-            Traceparent = Traceparent,
-            Timeout = timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
-        };
-    }
+    public XyoClientConfig WithTimeout(TimeSpan timeout) => this with { Timeout = timeout };
 
     /// <summary>
     /// Adds a trusted corporate internal storage host for Zero-Trust download validation.
     /// </summary>
     public XyoClientConfig AddTrustedDownloadHost(string host)
     {
-        var list = new List<string>(TrustedDownloadHosts) { host.Trim() };
-        return new XyoClientConfig(_apiKey)
+        if (host == null)
         {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = CorrelationId,
-            Traceparent = Traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = list,
-            DefaultHeaders = DefaultHeaders
-        };
+            throw new ArgumentNullException(nameof(host));
+        }
+
+        var list = new List<string>(TrustedDownloadHosts) { host.Trim() };
+        return this with { TrustedDownloadHosts = list };
     }
 
     /// <summary>
@@ -289,19 +279,7 @@ public sealed class XyoClientConfig
             [key] = value
         };
 
-        return new XyoClientConfig(_apiKey)
-        {
-            ApiKeySupplier = ApiKeySupplier,
-            BaseUrl = BaseUrl,
-            CorrelationId = CorrelationId,
-            Traceparent = Traceparent,
-            Timeout = Timeout,
-            MaxArchiveBytes = MaxArchiveBytes,
-            MaxEntryBytes = MaxEntryBytes,
-            MaxTarEntries = MaxTarEntries,
-            TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = headers
-        };
+        return this with { DefaultHeaders = headers };
     }
 
     /// <summary>
@@ -321,5 +299,132 @@ public sealed class XyoClientConfig
             return envUrl.TrimEnd('/');
         }
         return DefaultProductionUrl;
+    }
+
+    /// <summary>
+    /// Validates and normalises a candidate base URL: must be an absolute URI with no user info, query, or
+    /// fragment component, HTTPS unless the host is loopback, with any trailing slash trimmed. Mirrors the
+    /// scheme/loopback rules in <see cref="Security.DownloadSecurityPolicy"/> so the same policy governs
+    /// where the Bearer token is sent for API calls as for archive downloads.
+    /// </summary>
+    /// <remarks>
+    /// Internal rather than private so <see cref="XyoClient"/> can re-validate the env-var-derived default
+    /// lazily at construction time; see the comment on the <c>_baseUrl</c> field initializer above.
+    /// </remarks>
+    internal static string NormalizeBaseUrl(string baseUrl)
+    {
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            throw new ArgumentException("Base URL cannot be null or empty.", nameof(baseUrl));
+        }
+
+        string trimmed = baseUrl.TrimEnd('/');
+
+        if (!Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
+        {
+            throw new ArgumentException($"Base URL '{baseUrl}' is not a valid absolute URI.", nameof(baseUrl));
+        }
+
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        {
+            bool isHttpLoopback = string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) && IsLoopbackHost(uri.Host);
+            if (!isHttpLoopback)
+            {
+                throw new ArgumentException(
+                    $"Base URL '{baseUrl}' must use HTTPS (plain HTTP is only permitted for loopback hosts, to avoid transmitting the API key in cleartext).",
+                    nameof(baseUrl));
+            }
+        }
+
+        // Request URIs are built by string interpolation of BaseUrl + a path (see XyoClient.cs), not by
+        // composing against the parsed Uri. A UserInfo/Query/Fragment component here would be validated
+        // against the Uri form but then silently swallow the appended path once reduced back to a string
+        // (a trailing '#' turns the whole intended path into a URI fragment, routing every request to the
+        // host root) -- so those components are rejected outright rather than validated-then-ignored.
+        if (!string.IsNullOrEmpty(uri.UserInfo))
+        {
+            throw new ArgumentException($"Base URL '{baseUrl}' must not contain user info (e.g. 'user:pass@').", nameof(baseUrl));
+        }
+        if (!string.IsNullOrEmpty(uri.Query))
+        {
+            throw new ArgumentException($"Base URL '{baseUrl}' must not contain a query string.", nameof(baseUrl));
+        }
+        if (!string.IsNullOrEmpty(uri.Fragment))
+        {
+            throw new ArgumentException($"Base URL '{baseUrl}' must not contain a fragment.", nameof(baseUrl));
+        }
+
+        return trimmed;
+    }
+
+    /// <summary>
+    /// Validates an effective base URL and rethrows any failure with the environment-variable hint attached.
+    /// </summary>
+    /// <param name="baseUrl">The effective base URL to validate.</param>
+    /// <param name="propertyPath">Owning property named in the message, e.g. <c>XyoClientOptions.BaseUrl</c>.</param>
+    /// <param name="paramName">Parameter name to attach to the thrown <see cref="ArgumentException"/>.</param>
+    /// <remarks>
+    /// Shared by every construction path (<see cref="XyoClient"/>'s constructor and
+    /// <see cref="XyoClientOptions.ToConfig"/>) rather than duplicated, so the diagnostic cannot drift
+    /// between them. The hint matters because a value inherited from XYO_API_BASE_URL appears nowhere in the
+    /// caller's own code, and the error would otherwise name a URL they cannot find.
+    /// </remarks>
+    internal static void ValidateEffectiveBaseUrl(string baseUrl, string propertyPath, string paramName)
+    {
+        try
+        {
+            NormalizeBaseUrl(baseUrl);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ArgumentException(
+                $"{propertyPath} '{baseUrl}' is invalid: {ex.Message} " +
+                "If BaseUrl was not set explicitly, check the XYO_API_BASE_URL environment variable.",
+                paramName, ex);
+        }
+    }
+
+    private static bool IsLoopbackHost(string host)
+    {
+        return string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(host, "127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(host, "[::1]", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(host, "::1", StringComparison.OrdinalIgnoreCase) ||
+               (IPAddress.TryParse(host.Trim('[', ']'), out var ip) && IPAddress.IsLoopback(ip));
+    }
+
+    /// <summary>
+    /// Validates every key/value in a candidate default-headers dictionary for CRLF injection (CWE-113)
+    /// and returns a defensive copy. <see cref="WithDefaultHeader"/> already validated the entry it adds;
+    /// this closes the same gap for a dictionary assigned directly through the <c>init</c> accessor (e.g.
+    /// by <see cref="XyoClientOptions"/>).
+    /// </summary>
+    /// <remarks>
+    /// Copying is not just defence-in-depth: without it, this validated the caller's own dictionary and
+    /// then stored a live reference to it (<c>XyoClientOptions.ToConfig()</c> hands over its own
+    /// <c>Dictionary</c> by reference), so a caller mutating that dictionary after construction -- e.g.
+    /// still holding the <see cref="XyoClientOptions"/> instance used to build a singleton-registered
+    /// <see cref="XyoClient"/> -- bypassed validation entirely for every request made afterward. The copy
+    /// also normalises the comparer to <see cref="StringComparer.OrdinalIgnoreCase"/> regardless of what
+    /// the caller's dictionary used, matching this type's own default.
+    /// </remarks>
+    private static IReadOnlyDictionary<string, string> ValidateDefaultHeaders(IReadOnlyDictionary<string, string> headers)
+    {
+        if (headers == null)
+        {
+            throw new ArgumentNullException(nameof(headers));
+        }
+
+        var copy = new Dictionary<string, string>(headers.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, value) in headers)
+        {
+            if (CrlfRegex.IsMatch(key) || CrlfRegex.IsMatch(value))
+            {
+                throw new ArgumentException($"Default header '{key}' contains forbidden CRLF injection characters (CWE-113).", nameof(DefaultHeaders));
+            }
+            copy[key] = value;
+        }
+
+        return copy;
     }
 }

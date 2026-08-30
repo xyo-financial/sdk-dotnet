@@ -40,21 +40,34 @@ jobs:
 
       - name: Generate OpenAPI C# client
         run: |
-          npx -y @openapitools/openapi-generator-cli generate \
+          # Pinned to an exact version so generation is reproducible -- this job holds contents: write
+          # and a dispatch token, so an unpinned "latest" resolving to a compromised or simply broken
+          # release would execute with write credentials and auto-open a PR.
+          npx -y @openapitools/openapi-generator-cli@2.41.0 generate \
             -i specs/openapi.yml \
             -g csharp \
             -o /tmp/csharp-gen \
             --additional-properties=packageName=Xyo.Generated,targetFramework=net8.0,nullableReferenceTypes=true,netCoreProjectFile=true,library=generichost \
             --global-property apiTests=false,modelTests=false,apiDocs=false,modelDocs=false
 
-          # Sync generated files into src/Xyo.Generated
-          cp -r /tmp/csharp-gen/src/Xyo.Generated/* src/Xyo.Generated/
-          rm -rf /tmp/csharp-gen specs
+          # Replace the generated tree entirely rather than merging over it, so a model removed from the
+          # spec actually disappears instead of lingering forever as a stale type that still compiles and
+          # still ships in the NuGet package. The .csproj is hand-preserved since the generator's own copy
+          # is not the source of truth for it.
+          cp src/Xyo.Generated/Xyo.Generated.csproj /tmp/Xyo.Generated.csproj
+          rm -rf src/Xyo.Generated
+          mkdir -p src/Xyo.Generated
+          cp -r /tmp/csharp-gen/src/Xyo.Generated/. src/Xyo.Generated/
+          cp /tmp/Xyo.Generated.csproj src/Xyo.Generated/Xyo.Generated.csproj
+          rm -rf /tmp/csharp-gen /tmp/Xyo.Generated.csproj specs
 
       - name: Build, Format and Test Solution
         run: |
           dotnet restore Xyo.Sdk.sln
-          dotnet format Xyo.Sdk.sln
+          # Verifies hand-written code stays formatted, without rewriting the freshly generated tree --
+          # `dotnet format` on the whole solution would silently reformat generated output before the diff
+          # is captured, so the committed code no longer matches what the generator actually produced.
+          dotnet format src/Xyo.Sdk/Xyo.Sdk.csproj --verify-no-changes
           dotnet build Xyo.Sdk.sln -c Release --no-restore
           dotnet test Xyo.Sdk.sln -c Release --no-build
 

@@ -2,6 +2,7 @@ using System;
 using System.Net.Http;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Xyo.Sdk.Client;
 
@@ -48,19 +49,24 @@ public static class ServiceCollectionExtensions
 
         services.Configure(configureOptions);
 
-        var builder = services.AddHttpClient(HttpClientName, (sp, client) =>
+        var builder = services.AddHttpClient(HttpClientName, client =>
         {
-            var options = sp.GetRequiredService<IOptions<XyoClientOptions>>().Value;
-            client.Timeout = options.Timeout;
+            // XyoClient enforces XyoClientOptions.Timeout / DownloadTimeout itself per call via a linked
+            // CancellationTokenSource; HttpClient's own Timeout is a single total deadline that would kill a
+            // large archive download mid-stream, so it is left infinite.
+            client.Timeout = Timeout.InfiniteTimeSpan;
         })
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(15),
-            ConnectTimeout = TimeSpan.FromSeconds(10)
+            ConnectTimeout = TimeSpan.FromSeconds(10),
+            // The SDK validates every redirect hop itself against the download allowlist;
+            // letting the handler auto-follow would bypass that validation (SSRF).
+            AllowAutoRedirect = false
         })
         .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
-        services.AddTransient<IXyoClient>(sp =>
+        services.AddSingleton<IXyoClient>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<XyoClientOptions>>().Value;
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
@@ -93,16 +99,21 @@ public static class ServiceCollectionExtensions
 
         var builder = services.AddHttpClient(HttpClientName, client =>
         {
-            client.Timeout = config.Timeout;
+            // See the other AddXyoClient overload: XyoClient enforces its own per-call deadlines, so the
+            // HttpClient-level timeout is left infinite rather than capping the whole connection lifetime.
+            client.Timeout = Timeout.InfiniteTimeSpan;
         })
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(15),
-            ConnectTimeout = TimeSpan.FromSeconds(10)
+            ConnectTimeout = TimeSpan.FromSeconds(10),
+            // The SDK validates every redirect hop itself against the download allowlist;
+            // letting the handler auto-follow would bypass that validation (SSRF).
+            AllowAutoRedirect = false
         })
         .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
-        services.AddTransient<IXyoClient>(sp =>
+        services.AddSingleton<IXyoClient>(sp =>
         {
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             var httpClient = httpClientFactory.CreateClient(HttpClientName);

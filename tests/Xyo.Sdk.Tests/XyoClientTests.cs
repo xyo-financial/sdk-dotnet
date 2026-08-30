@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Formats.Tar;
+using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
@@ -13,6 +16,32 @@ namespace Xyo.Sdk.Tests;
 
 public class XyoClientTests
 {
+    [Fact]
+    public async Task EnrichTransactionAsync_NullRequiredField_ThrowsWithRawResponseBodyAttached()
+    {
+        // A payload the API is documented to be able to send (a required field returned as null) must
+        // surface as a typed exception carrying the actual payload -- not just a generic message with
+        // nothing to inspect to find out which record/field was the problem.
+        string jsonResponse = @"
+        {
+            ""merchant"": ""Costa Coffee"",
+            ""description"": ""British coffeehouse chain."",
+            ""categories"": [""Food & Dining""],
+            ""logo"": ""https://cdn.xyo.financial/logos/costa.png"",
+            ""location"": null,
+            ""address"": ""40-42 Great Portland St, London W1W 7LZ""
+        }";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, jsonResponse);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+
+        Assert.Contains("does not conform to the enrichment schema", ex.Message);
+        Assert.NotNull(ex.RawResponseBody);
+        Assert.Contains("Costa Coffee", ex.RawResponseBody);
+    }
+
     [Fact]
     public async Task EnrichTransactionAsync_ValidInput_ReturnsEnrichedProfile()
     {
@@ -283,6 +312,53 @@ public class XyoClientTests
     }
 
     [Fact]
+    public async Task EnsureSuccessResponseAsync_ControlCharactersInBody_FlattenedInMessageButNotInRawResponseBody()
+    {
+        const char esc = '\u001b';
+        const char lineSeparator = '\u2028';
+        const char paragraphSeparator = '\u2029';
+        string body = $"Payment approved{esc}[31mFAKE{esc}[0m\n2026-08-29 INFO forged line {lineSeparator}sep{paragraphSeparator} \0end";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.InternalServerError, body);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+
+        // The summary used in Message must not carry any control character an attacker-influenced body
+        // could inject: CR/LF (log-line forgery), ESC (ANSI escape injection), U+2028/U+2029 (line
+        // separators to JS-based log viewers), or NUL (truncation in C-based sinks).
+        Assert.DoesNotContain(esc, ex.Message);
+        Assert.DoesNotContain('\n', ex.Message);
+        Assert.DoesNotContain('\r', ex.Message);
+        Assert.DoesNotContain(lineSeparator, ex.Message);
+        Assert.DoesNotContain(paragraphSeparator, ex.Message);
+        Assert.DoesNotContain('\0', ex.Message);
+
+        // Full, unaltered fidelity is still available via RawResponseBody for callers who opt into it.
+        Assert.NotNull(ex.RawResponseBody);
+        Assert.Contains(esc, ex.RawResponseBody);
+        Assert.Contains(lineSeparator, ex.RawResponseBody);
+    }
+
+    [Fact]
+    public async Task EnsureSuccessResponseAsync_TruncationBoundarySplitsSurrogatePair_DoesNotEmitLoneSurrogate()
+    {
+        // A surrogate pair (an emoji) placed so it straddles the 512-character clamp boundary.
+        string prefix = new string('A', 511);
+        string body = prefix + "\U0001F600" + new string('B', 100); // U+1F600 = high+low surrogate pair
+        var handler = new MockHttpMessageHandler(HttpStatusCode.InternalServerError, body);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+
+        // Whatever character the message ends on (before the ellipsis), it must not be a lone surrogate --
+        // some structured-log serializers reject a string containing one as invalid UTF-16 outright.
+        string beforeEllipsis = ex.Message.TrimEnd('\u2026');
+        Assert.False(char.IsSurrogate(beforeEllipsis[^1]));
+    }
+
+    [Fact]
     public async Task SendRequestAsync_Timeout_ThrowsXyoNetworkExceptionWithTimeoutDetails()
     {
         var handler = new MockHttpMessageHandler((_, _) =>
@@ -319,7 +395,7 @@ public class XyoClientTests
         var handler = new MockHttpMessageHandler((_, _) =>
             throw new TaskCanceledException("The request was canceled due to timeout."));
         using var httpClient = new HttpClient(handler);
-        var config = new XyoClientConfig("xyo_test_token") { Timeout = TimeSpan.FromSeconds(15) };
+        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromSeconds(20) };
         using var client = new XyoClient(config, httpClient);
 
         var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
@@ -328,7 +404,7 @@ public class XyoClientTests
             {
             }
         });
-        Assert.Contains("Network request timed out after 15 seconds.", ex.Message);
+        Assert.Contains("Archive download timed out after 20 seconds.", ex.Message);
     }
 
     [Fact]
@@ -351,6 +427,248 @@ public class XyoClientTests
             {
             }
         });
+    }
+
+    private static byte[] TarGzOfRecords(int count)
+    {
+        string RecordJson(int i) =>
+            $@"{{ ""merchant"": ""M{i}"", ""description"": ""D"", ""categories"": [""General""], " +
+            @"""logo"": ""https://cdn.xyo.financial/logo.png"", ""location"": ""London, UK"", ""address"": ""1 High St"" }";
+
+        using var tarMs = new MemoryStream();
+        using (var tarWriter = new TarWriter(tarMs, TarEntryFormat.Pax, leaveOpen: true))
+        {
+            for (int i = 0; i < count; i++)
+            {
+                var entry = new PaxTarEntry(TarEntryType.RegularFile, $"{i:000}.json")
+                {
+                    DataStream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(RecordJson(i)))
+                };
+                tarWriter.WriteEntry(entry);
+            }
+        }
+        tarMs.Position = 0;
+        using var gzMs = new MemoryStream();
+        using (var gz = new GZipStream(gzMs, CompressionLevel.Optimal, leaveOpen: true))
+        {
+            tarMs.CopyTo(gz);
+        }
+        return gzMs.ToArray();
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_SlowConsumerBetweenRecords_DoesNotCountAgainstDownloadTimeout()
+    {
+        // Reproduces the exact scenario a real high-volume pipeline hits: DownloadTimeout is well under
+        // what 3 records x slow-consumer-processing-per-record would add up to (600ms x 3 = 1800ms > the
+        // 1s DownloadTimeout below), but the network/decompression side is instant. Before the fix, the
+        // single wall-clock deadline spanned the whole enumeration and counted the consumer's own
+        // Task.Delay against the SDK's timeout; after the fix, only production of the next record is
+        // timed, and consumer time between yields is never counted, so this must complete without
+        // throwing regardless of how long the caller takes to process each record.
+        var mockHandler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(TarGzOfRecords(3))
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(mockHandler);
+        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromSeconds(1) };
+        using var client = new XyoClient(config, httpClient);
+
+        int received = 0;
+        await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+        {
+            received++;
+            await Task.Delay(600); // simulated per-record consumer work (e.g. a database write)
+        }
+
+        Assert.Equal(3, received);
+    }
+
+    private sealed class StallingStream : Stream
+    {
+        private readonly byte[] _data;
+        private int _position;
+        private bool _stalled;
+
+        public StallingStream(byte[] data) => _data = data;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            // Stall forever once past the halfway point, simulating a network read that never completes
+            // (a stalled connection) rather than a fast/instant mock response. Checked BEFORE copying, and
+            // reads are capped to a small chunk, so this reliably triggers partway through -- a single
+            // ReadAsync large enough to consume the whole (tiny, few-hundred-byte) test archive in one call
+            // would otherwise never revisit this check at all.
+            if (!_stalled && _position >= _data.Length / 2)
+            {
+                _stalled = true;
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+            }
+
+            int toCopy = Math.Min(Math.Min(buffer.Length, 16), _data.Length - _position);
+            _data.AsSpan(_position, toCopy).CopyTo(buffer.Span);
+            _position += toCopy;
+            return toCopy;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_StalledNetworkRead_ThrowsTypedExceptionNotRaw()
+    {
+        // Before the fix, a stall while reading the archive body (as opposed to the initial SendAsync)
+        // was outside any exception translation and would have escaped as a raw
+        // OperationCanceledException/TaskCanceledException, bypassing the SDK's typed exception hierarchy.
+        var mockHandler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new StallingStream(TarGzOfRecords(3)))
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(mockHandler);
+        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromMilliseconds(200) };
+        using var client = new XyoClient(config, httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+            {
+            }
+        });
+
+        Assert.Contains("stalled", ex.Message);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_RedirectToUntrustedHost_ThrowsXyoClientException()
+    {
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Found);
+            response.Headers.Location = new Uri("https://attacker.evil.com/archive.tar.gz");
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+            {
+            }
+        });
+
+        Assert.Contains("not in the trusted domain allowlist", ex.Message);
+        // Refused on the redirect itself -- the attacker host is never actually requested.
+        Assert.Single(handler.CapturedRequests);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_RedirectLoop_StopsAtMaxDownloadRedirectsWithAccurateCount()
+    {
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Found);
+            response.Headers.Location = new Uri("https://api.xyo.financial/batches/next.tar.gz");
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+            {
+            }
+        });
+
+        Assert.Contains($"maximum of {XyoClient.MaxDownloadRedirects} redirects", ex.Message);
+        // MaxDownloadRedirects redirects are genuinely followed (that many requests are made and their
+        // redirects taken) before the next one trips the cap -- the message's claimed count must match
+        // what actually happened, not be off by one.
+        Assert.Equal(XyoClient.MaxDownloadRedirects + 1, handler.CapturedRequests.Count);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_RedirectToExternalStorage_WithholdsTracingHeadersToo()
+    {
+        static byte[] MinimalTarGz()
+        {
+            string record = @"{ ""merchant"": ""M"", ""description"": ""D"", ""categories"": [""General""], " +
+                @"""logo"": ""https://cdn.xyo.financial/logo.png"", ""location"": ""London, UK"", ""address"": ""1 High St"" }";
+
+            using var tarMs = new MemoryStream();
+            using (var tarWriter = new TarWriter(tarMs, TarEntryFormat.Pax, leaveOpen: true))
+            {
+                var entry = new PaxTarEntry(TarEntryType.RegularFile, "001.json")
+                {
+                    DataStream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(record))
+                };
+                tarWriter.WriteEntry(entry);
+            }
+            tarMs.Position = 0;
+            using var gzMs = new MemoryStream();
+            using (var gz = new GZipStream(gzMs, CompressionLevel.Optimal, leaveOpen: true))
+            {
+                tarMs.CopyTo(gz);
+            }
+            return gzMs.ToArray();
+        }
+
+        int callCount = 0;
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            callCount++;
+            if (callCount == 1)
+            {
+                var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+                redirect.Headers.Location = new Uri("https://xyo-financial.s3.amazonaws.com/batches/1.tar.gz");
+                return Task.FromResult(redirect);
+            }
+
+            var final = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(MinimalTarGz())
+            };
+            return Task.FromResult(final);
+        });
+        using var httpClient = new HttpClient(handler);
+        var config = new XyoClientConfig("xyo_test_token")
+            .WithCorrelationId("test-corr-id")
+            .WithTraceparent("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+        using var client = new XyoClient(config, httpClient);
+
+        await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+        {
+        }
+
+        Assert.Equal(2, handler.CapturedRequests.Count);
+
+        var internalRequest = handler.CapturedRequests[0];
+        Assert.True(internalRequest.Headers.NonValidated.Contains("X-Correlation-ID"));
+        Assert.True(internalRequest.Headers.NonValidated.Contains("traceparent"));
+        Assert.NotNull(internalRequest.Headers.Authorization);
+
+        var externalRequest = handler.CapturedRequests[1];
+        Assert.False(externalRequest.Headers.NonValidated.Contains("X-Correlation-ID"));
+        Assert.False(externalRequest.Headers.NonValidated.Contains("traceparent"));
+        Assert.Null(externalRequest.Headers.Authorization);
     }
 
     [Fact]
@@ -518,5 +836,307 @@ public class XyoClientTests
         await client.EnrichTransactionsAsync(batch);
 
         Assert.Equal("gb", item.CountryCode);
+    }
+
+    private sealed class SlowContinuousStream : Stream
+    {
+        private readonly byte[] _data;
+        private int _position;
+        private readonly TimeSpan _chunkDelay;
+
+        public SlowContinuousStream(byte[] data, TimeSpan chunkDelay)
+        {
+            _data = data;
+            _chunkDelay = chunkDelay;
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_position >= _data.Length)
+            {
+                return 0;
+            }
+
+            await Task.Delay(_chunkDelay, cancellationToken).ConfigureAwait(false);
+
+            int toCopy = Math.Min(Math.Min(buffer.Length, 16), _data.Length - _position);
+            _data.AsSpan(_position, toCopy).CopyTo(buffer.Span);
+            _position += toCopy;
+            return toCopy;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_SlowContinuousTransfer_NeverStalls_CompletesSuccessfully()
+    {
+        // Tests that a continuous stream delivering bytes steadily at intervals shorter than DownloadTimeout
+        // (e.g. 20ms delay per chunk with a 100ms idle timeout, but total duration > 200ms) completes successfully
+        // without false stall timeouts, proving that the idle timer resets on every byte/read.
+        byte[] archiveData = TarGzOfRecords(3);
+        var mockHandler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new SlowContinuousStream(archiveData, TimeSpan.FromMilliseconds(20)))
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(mockHandler);
+        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromMilliseconds(100) };
+        using var client = new XyoClient(config, httpClient);
+
+        int count = 0;
+        await foreach (var record in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+        {
+            count++;
+        }
+
+        Assert.Equal(3, count);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_PeerDripsInsideEveryIdleWindow_TripsTotalDurationBound()
+    {
+        // The idle timeout resets on every read, so a peer delivering a few bytes just inside each window
+        // never stalls and, on its own, would hold the connection and the enumerating task open indefinitely
+        // (bounded in bytes by MaxArchiveBytes, unbounded in time). MaxTotalDownloadDuration is the bound
+        // that turns that into a failure rather than a job that never finishes.
+        var mockHandler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new SlowContinuousStream(TarGzOfRecords(4), TimeSpan.FromMilliseconds(60)))
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(mockHandler);
+        var config = new XyoClientConfig("xyo_test_token")
+        {
+            DownloadTimeout = TimeSpan.FromMilliseconds(500),         // no single read ever stalls
+            MaxTotalDownloadDuration = TimeSpan.FromMilliseconds(300) // but the total does run out
+        };
+        using var client = new XyoClient(config, httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+            {
+            }
+        });
+
+        Assert.Contains("maximum total network transfer time", ex.Message);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_SlowConsumer_DoesNotConsumeTotalDurationBudget()
+    {
+        // The total bound accumulates only time spent waiting on the network, so a caller that takes far
+        // longer than MaxTotalDownloadDuration to process the records it is handed must still succeed.
+        var mockHandler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(TarGzOfRecords(3))
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(mockHandler);
+        var config = new XyoClientConfig("xyo_test_token")
+        {
+            DownloadTimeout = TimeSpan.FromSeconds(5),
+            MaxTotalDownloadDuration = TimeSpan.FromMilliseconds(200)
+        };
+        using var client = new XyoClient(config, httpClient);
+
+        int received = 0;
+        await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+        {
+            received++;
+            await Task.Delay(150); // 450ms of consumer work against a 200ms network budget
+        }
+
+        Assert.Equal(3, received);
+    }
+
+    [Fact]
+    public async Task IdleTimeoutStream_LeaveOpen_DoesNotDisposeAStreamItDoesNotOwn()
+    {
+        var inner = new DisposeCountingStream(new byte[] { 1, 2, 3, 4 });
+
+        var borrowed = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan, leaveOpen: true);
+        borrowed.Dispose();
+        await borrowed.DisposeAsync();
+
+        Assert.Equal(0, inner.DisposeCount);
+
+        var owning = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan, leaveOpen: false);
+        owning.Dispose();
+
+        Assert.Equal(1, inner.DisposeCount);
+    }
+
+    private sealed class DisposeCountingStream : Stream
+    {
+        private readonly byte[] _data;
+        private int _position;
+
+        public DisposeCountingStream(byte[] data) => _data = data;
+
+        public int DisposeCount { get; private set; }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            int toCopy = Math.Min(buffer.Length, _data.Length - _position);
+            _data.AsSpan(_position, toCopy).CopyTo(buffer.Span);
+            _position += toCopy;
+            return ValueTask.FromResult(toCopy);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                DisposeCount++;
+            }
+            base.Dispose(disposing);
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void IdleTimeoutStream_SynchronousRead_ThrowsNotSupportedRatherThanReadingUntimed()
+    {
+        // Stream.Read takes no CancellationToken, so the idle timeout cannot be enforced on a synchronous
+        // read. Failing loudly is the honest option; the alternative is an unbounded read behind an API
+        // whose name promises a timeout.
+        using var inner = new MemoryStream(new byte[] { 1, 2, 3, 4 });
+        using var stream = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(10));
+
+        Assert.Throws<NotSupportedException>(() => stream.Read(new byte[4], 0, 4));
+        Assert.Throws<NotSupportedException>(() => stream.Read(new Span<byte>(new byte[4])));
+    }
+
+    [Fact]
+    public async Task EnrichTransactionAsync_ExceedingUnarySizeCap_AttachesBoundedDiagnosticPrefix()
+    {
+        // Rejecting an oversized body without keeping any of it leaves an operator unable to tell a gateway
+        // HTML error page from a truncated proxy response from a genuinely large payload.
+        string oversized = "<html><body>502 Bad Gateway from edge-proxy-7</body></html>"
+            + new string('A', 2 * 1024 * 1024);
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, oversized);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+
+        Assert.Contains("exceeded the maximum supported size", ex.Message);
+        Assert.NotNull(ex.RawResponseBody);
+        Assert.Contains("502 Bad Gateway from edge-proxy-7", ex.RawResponseBody);
+        Assert.True(ex.RawResponseBody!.Length <= 512, $"diagnostic prefix must stay bounded, was {ex.RawResponseBody.Length}");
+    }
+
+    [Fact]
+    public async Task EnrichTransactionAsync_ExceedingUnarySizeCap_ThrowsXyoServerException()
+    {
+        // 2 MB of data returned with 200 OK (e.g. gateway HTML error page with Content-Type application/json)
+        string oversized = "{\"data\":\"" + new string('A', 2 * 1024 * 1024) + "\"}";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, oversized);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+        Assert.Contains("exceeded the maximum supported size", ex.Message);
+    }
+
+    [Fact]
+    public async Task EnrichTransactionAsync_SchemaMismatch_AttachesBoundedRawResponseBody()
+    {
+        string invalidJson = "{\"merchant\": null, \"some_unexpected_field\": 12345}";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, invalidJson);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+        Assert.Contains("does not conform to the enrichment schema", ex.Message);
+        Assert.NotNull(ex.RawResponseBody);
+        Assert.Equal(invalidJson, ex.RawResponseBody);
+    }
+
+    [Fact]
+    public async Task EnrichTransactionsAsync_AlreadyNormalizedBatch_SendsItemsUnchanged()
+    {
+        // The batch path elides its defensive copy when an item's country code already equals its normalised
+        // form. This asserts the observable contract of that optimization -- an already-uppercase batch is
+        // transmitted verbatim -- rather than asserting how the BCL happens to implement ToUpperInvariant.
+        string captured = string.Empty;
+        var handler = new MockHttpMessageHandler(async (req, _) =>
+        {
+            captured = await req.Content!.ReadAsStringAsync();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    @"{ ""id"": ""job-1"", ""link"": ""https://api.xyo.financial/batches/1.tar.gz"" }",
+                    System.Text.Encoding.UTF8, "application/json")
+            };
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var requests = new[]
+        {
+            new EnrichmentRequest("TESCO STORES 3428", "GB"),
+            new EnrichmentRequest("UBER TRIP", "US")
+        };
+
+        await client.EnrichTransactionsAsync(requests);
+
+        Assert.Contains(@"""countryCode"":""GB""", captured);
+        Assert.Contains(@"""countryCode"":""US""", captured);
+    }
+
+    [Fact]
+    public async Task EnrichTransactionsAsync_MixedCaseBatch_NormalizesWithoutMutatingCallerObjects()
+    {
+        string captured = string.Empty;
+        var handler = new MockHttpMessageHandler(async (req, _) =>
+        {
+            captured = await req.Content!.ReadAsStringAsync();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    @"{ ""id"": ""job-1"", ""link"": ""https://api.xyo.financial/batches/1.tar.gz"" }",
+                    System.Text.Encoding.UTF8, "application/json")
+            };
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var lowercase = new EnrichmentRequest("TESCO STORES 3428", "gb");
+        await client.EnrichTransactionsAsync(new[] { lowercase });
+
+        Assert.Contains(@"""countryCode"":""GB""", captured);
+        // The caller's own object is never mutated in place by normalisation.
+        Assert.Equal("gb", lowercase.CountryCode);
     }
 }
