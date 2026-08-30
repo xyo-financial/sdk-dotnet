@@ -212,4 +212,72 @@ public class XyoClientConfigTests
 
         Assert.DoesNotContain("attacker.example.com", config.TrustedDownloadHosts);
     }
+
+    [Fact]
+#pragma warning disable CS0618 // Exercising the obsolete alias is the point of this test.
+    public void DownloadTimeout_WhenSetAlone_SeedsBothReplacementProperties()
+    {
+        // Gherkin: "The obsolete setting still works" -- a configuration that sets only the obsolete
+        // DownloadTimeout must have both DownloadConnectTimeout and ReadIdleTimeout take that value.
+        var config = new XyoClientConfig("key") { DownloadTimeout = TimeSpan.FromMinutes(3) };
+
+        Assert.Equal(TimeSpan.FromMinutes(3), config.DownloadConnectTimeout);
+        Assert.Equal(TimeSpan.FromMinutes(3), config.ReadIdleTimeout);
+    }
+
+    [Fact]
+    public void DownloadConnectTimeoutAndReadIdleTimeout_ExplicitValues_OverrideTheObsoleteAlias()
+    {
+        // An explicit DownloadConnectTimeout/ReadIdleTimeout must win over DownloadTimeout regardless of the
+        // order the two are set in, since a caller migrating away from the obsolete property may still have
+        // it configured elsewhere (e.g. a shared base configuration).
+        var config = new XyoClientConfig("key")
+        {
+            DownloadTimeout = TimeSpan.FromMinutes(3),
+            DownloadConnectTimeout = TimeSpan.FromMinutes(7),
+            ReadIdleTimeout = TimeSpan.FromSeconds(45)
+        };
+
+        Assert.Equal(TimeSpan.FromMinutes(7), config.DownloadConnectTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(45), config.ReadIdleTimeout);
+    }
+#pragma warning restore CS0618
+
+    [Fact]
+    public void DownloadConnectTimeoutAndReadIdleTimeout_Unset_UseTheirOwnIndependentDefaults()
+    {
+        var config = new XyoClientConfig("key");
+
+        Assert.Equal(TimeSpan.FromMinutes(10), config.DownloadConnectTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(120), config.ReadIdleTimeout);
+    }
+
+    [Fact]
+#pragma warning disable CS0618 // Exercising the obsolete alias is the point of this test.
+    public void ToConfig_ObsoleteDownloadTimeoutAlone_SeedsBothReplacementPropertiesOnConfig()
+    {
+        var config = new XyoClientOptions
+        {
+            ApiKey = "key",
+            DownloadTimeout = TimeSpan.FromSeconds(90)
+        }.ToConfig();
+#pragma warning restore CS0618
+
+        Assert.Equal(TimeSpan.FromSeconds(90), config.DownloadConnectTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(90), config.ReadIdleTimeout);
+    }
+
+    [Fact]
+    public void ToConfig_ExplicitDownloadConnectTimeoutAndReadIdleTimeout_ThreadedThroughIndependently()
+    {
+        var config = new XyoClientOptions
+        {
+            ApiKey = "key",
+            DownloadConnectTimeout = TimeSpan.FromMinutes(4),
+            ReadIdleTimeout = TimeSpan.FromSeconds(30)
+        }.ToConfig();
+
+        Assert.Equal(TimeSpan.FromMinutes(4), config.DownloadConnectTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(30), config.ReadIdleTimeout);
+    }
 }

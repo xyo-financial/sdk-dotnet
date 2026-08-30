@@ -51,9 +51,9 @@ public static class ServiceCollectionExtensions
 
         var builder = services.AddHttpClient(HttpClientName, client =>
         {
-            // XyoClient enforces XyoClientOptions.Timeout / DownloadTimeout itself per call via a linked
-            // CancellationTokenSource; HttpClient's own Timeout is a single total deadline that would kill a
-            // large archive download mid-stream, so it is left infinite.
+            // XyoClient enforces XyoClientOptions.Timeout / DownloadConnectTimeout / ReadIdleTimeout itself
+            // per call via a linked CancellationTokenSource; HttpClient's own Timeout is a single total
+            // deadline that would kill a large archive download mid-stream, so it is left infinite.
             client.Timeout = Timeout.InfiniteTimeSpan;
         })
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler

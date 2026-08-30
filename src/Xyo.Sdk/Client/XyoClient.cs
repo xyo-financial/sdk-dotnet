@@ -368,9 +368,10 @@ public sealed class XyoClient : IXyoClient
         Uri validatedUri = _securityPolicy.ValidateDownloadUrl(downloadUrl);
         HttpResponseMessage? response = null;
 
-        // DownloadTimeout bounds the whole operation (every redirect hop plus the full download and
-        // decompression), independently of the shorter unary-call Timeout -- see SendRequestAsync.
-        using var timeoutCts = new CancellationTokenSource(_config.DownloadTimeout);
+        // DownloadConnectTimeout bounds only the connection/redirect phase (every redirect hop up to and
+        // including receiving response headers), independently of both the shorter unary-call Timeout (see
+        // SendRequestAsync) and the per-read idle bound applied to the archive body below (ReadIdleTimeout).
+        using var timeoutCts = new CancellationTokenSource(_config.DownloadConnectTimeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
         CancellationToken effectiveToken = linkedCts.Token;
 
@@ -403,7 +404,9 @@ public sealed class XyoClient : IXyoClient
                 }
                 catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
                 {
-                    throw new XyoNetworkException($"Archive download timed out after {_config.DownloadTimeout.TotalSeconds} seconds.", ex);
+                    throw new XyoNetworkException(
+                        $"Archive download connection phase timed out after {_config.DownloadConnectTimeout.TotalSeconds} " +
+                        "seconds while establishing the connection, following redirects, or waiting for response headers.", ex);
                 }
                 catch (OperationCanceledException)
                 {
@@ -444,14 +447,14 @@ public sealed class XyoClient : IXyoClient
             await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
 
             using var responseStream = await response!.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            // DownloadTimeout is the per-read idle bound (it trips only when the peer stops sending);
+            // ReadIdleTimeout is the per-read idle bound (it trips only when the peer stops sending);
             // MaxTotalDownloadDuration bounds the cumulative time spent waiting on the network, so a peer
             // that drips bytes just inside every idle window cannot hold the transfer open indefinitely.
             // Neither counts the caller's own processing time between yielded records. leaveOpen because the
             // `using` on `responseStream` above already owns its lifetime.
             using var idleStream = new IdleTimeoutStream(
                 responseStream,
-                _config.DownloadTimeout,
+                _config.ReadIdleTimeout,
                 _config.MaxTotalDownloadDuration,
                 leaveOpen: true);
 
@@ -945,7 +948,8 @@ public sealed class XyoClient : IXyoClient
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new XyoNetworkException(
-                    $"Archive download stalled for more than {_idleTimeout.TotalSeconds} seconds.", ex);
+                    $"Archive download read stalled: the peer did not produce further data within " +
+                    $"{_idleTimeout.TotalSeconds} seconds.", ex);
             }
         }
 

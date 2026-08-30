@@ -10,6 +10,10 @@ namespace Xyo.Sdk.Client;
 /// </summary>
 public sealed class XyoClientOptions
 {
+    private TimeSpan? _downloadTimeout;
+    private TimeSpan? _downloadConnectTimeout;
+    private TimeSpan? _readIdleTimeout;
+
     /// <summary>
     /// Gets or sets the static API key.
     /// </summary>
@@ -41,16 +45,47 @@ public sealed class XyoClientOptions
 
     /// <summary>
     /// Gets or sets the timeout duration for a single unary API call (default 30 seconds). Does not bound
-    /// archive downloads, see <see cref="DownloadTimeout"/>.
+    /// archive downloads, see <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/>.
     /// </summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Gets or sets the timeout duration for archive download and stream processing (default 10 minutes),
-    /// independent of <see cref="Timeout"/>. Enforces a deadline on initial HTTP connection/redirects and
-    /// acts as a per-read idle stall timeout during stream decompression.
+    /// Gets or sets the deadline for the connection and redirect phase of an archive download (default 10
+    /// minutes): establishing the HTTP connection, following redirects, and waiting for response headers.
+    /// Does not bound time spent reading the archive body once headers arrive; see
+    /// <see cref="ReadIdleTimeout"/> for that.
     /// </summary>
-    public TimeSpan DownloadTimeout { get; set; } = TimeSpan.FromMinutes(10);
+    public TimeSpan DownloadConnectTimeout
+    {
+        get => _downloadConnectTimeout ?? TimeSpan.FromMinutes(10);
+        set => _downloadConnectTimeout = value;
+    }
+
+    /// <summary>
+    /// Gets or sets the idle stall timeout for a single network read during archive streaming (default 120
+    /// seconds), reset on every read. See <see cref="DownloadConnectTimeout"/> for the earlier
+    /// connection/redirect phase.
+    /// </summary>
+    public TimeSpan ReadIdleTimeout
+    {
+        get => _readIdleTimeout ?? TimeSpan.FromSeconds(120);
+        set => _readIdleTimeout = value;
+    }
+
+    /// <summary>
+    /// Gets or sets the timeout duration previously applied to both the connection/redirect phase and the
+    /// per-read idle stall detection of an archive download. Superseded by
+    /// <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/>, which separate those two
+    /// unrelated roles. When set, it seeds the value of whichever of those two properties is not itself set
+    /// explicitly, via <see cref="ToConfig"/>, so existing configuration keeps working. Scheduled for
+    /// removal in the next major version per the versioning policy in CONTRIBUTING.md.
+    /// </summary>
+    [Obsolete("Use DownloadConnectTimeout (connection/redirect deadline) and ReadIdleTimeout (per-read stall timeout) instead. DownloadTimeout still seeds both when set, but conflates two unrelated roles and will be removed in the next major version.")]
+    public TimeSpan DownloadTimeout
+    {
+        get => _downloadTimeout ?? TimeSpan.FromMinutes(10);
+        set => _downloadTimeout = value;
+    }
 
     /// <summary>
     /// Gets or sets the maximum cumulative time an archive transfer may spend waiting on the network across
@@ -107,14 +142,13 @@ public sealed class XyoClientOptions
         // saving is one Uri.TryCreate per config construction (once per process for a DI singleton).
         XyoClientConfig.ValidateEffectiveBaseUrl(BaseUrl, "XyoClientOptions.BaseUrl", nameof(BaseUrl));
 
-        return new XyoClientConfig(ApiKey)
+        XyoClientConfig config = new(ApiKey)
         {
             ApiKeySupplier = ApiKeySupplier,
             BaseUrl = BaseUrl,
             CorrelationId = CorrelationId,
             Traceparent = Traceparent,
             Timeout = Timeout,
-            DownloadTimeout = DownloadTimeout,
             MaxTotalDownloadDuration = MaxTotalDownloadDuration,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxDecompressedBytes = MaxDecompressedBytes,
@@ -123,6 +157,30 @@ public sealed class XyoClientOptions
             TrustedDownloadHosts = TrustedDownloadHosts,
             DefaultHeaders = DefaultHeaders
         };
+
+        // DownloadTimeout is obsolete but must still seed DownloadConnectTimeout/ReadIdleTimeout when set --
+        // and only when set. XyoClientConfig's own getters for those two properties already fall back to
+        // DownloadTimeout on their own, so it is passed through here only if the caller actually configured
+        // it on this options instance, never as a default value that would silently clobber
+        // DownloadConnectTimeout/ReadIdleTimeout's own independent defaults.
+#pragma warning disable CS0618 // DownloadTimeout is obsolete; this is its intentional seed path.
+        if (_downloadTimeout.HasValue)
+        {
+            config = config with { DownloadTimeout = _downloadTimeout.Value };
+        }
+#pragma warning restore CS0618
+
+        if (_downloadConnectTimeout.HasValue)
+        {
+            config = config with { DownloadConnectTimeout = _downloadConnectTimeout.Value };
+        }
+
+        if (_readIdleTimeout.HasValue)
+        {
+            config = config with { ReadIdleTimeout = _readIdleTimeout.Value };
+        }
+
+        return config;
     }
 
     private static string ResolveDefaultBaseUrl()

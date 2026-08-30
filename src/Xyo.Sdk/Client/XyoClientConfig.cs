@@ -19,9 +19,15 @@ public sealed record XyoClientConfig
         @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\z",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly TimeSpan DefaultDownloadConnectTimeout = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan DefaultReadIdleTimeout = TimeSpan.FromSeconds(120);
+
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string? _apiKey;
     private string? _traceparent;
+    private TimeSpan? _legacyDownloadTimeout;
+    private TimeSpan? _downloadConnectTimeoutOverride;
+    private TimeSpan? _readIdleTimeoutOverride;
     // Deliberately NOT validated here: this field initializer runs on every construction, before an
     // explicit `BaseUrl = ...` in an object initializer is applied. Validating eagerly would mean an
     // invalid XYO_API_BASE_URL breaks construction even when the caller overrides BaseUrl explicitly.
@@ -81,19 +87,63 @@ public sealed record XyoClientConfig
     /// <summary>
     /// Gets the timeout duration for a single unary API call (enrichment, batch submit, status lookup).
     /// Enforced independently per call via a linked cancellation token; does not bound archive downloads,
-    /// see <see cref="DownloadTimeout"/>.
+    /// see <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/>.
     /// </summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Gets the timeout duration for archive download and stream processing
-    /// (<see cref="Xyo.Sdk.Client.IXyoClient.StreamEnrichmentCollectionAsync"/> /
-    /// <see cref="Xyo.Sdk.Client.IXyoClient.DownloadEnrichmentCollectionAsync"/>).
-    /// Enforces a deadline on initial HTTP connection/redirects, and serves as an idle stall timeout
-    /// between network reads during stream processing. Kept independent of <see cref="Timeout"/> because a
-    /// multi-hundred-MB archive legitimately needs far longer than a single unary call.
+    /// Gets the deadline for the connection and redirect phase of an archive download (default 10 minutes):
+    /// establishing the HTTP connection, following redirects, and waiting for response headers, for
+    /// <see cref="Xyo.Sdk.Client.IXyoClient.StreamEnrichmentCollectionAsync"/> /
+    /// <see cref="Xyo.Sdk.Client.IXyoClient.DownloadEnrichmentCollectionAsync"/>. Does not bound time spent
+    /// reading the archive body once headers arrive; see <see cref="ReadIdleTimeout"/> for that. Falls back
+    /// to the obsolete <see cref="DownloadTimeout"/>'s value when this property is not itself set
+    /// explicitly (see that property's remarks).
     /// </summary>
-    public TimeSpan DownloadTimeout { get; init; } = TimeSpan.FromMinutes(10);
+    public TimeSpan DownloadConnectTimeout
+    {
+        get => _downloadConnectTimeoutOverride ?? _legacyDownloadTimeout ?? DefaultDownloadConnectTimeout;
+        init => _downloadConnectTimeoutOverride = value;
+    }
+
+    /// <summary>
+    /// Gets the idle stall timeout for a single network read during archive streaming (default 120
+    /// seconds), reset on every read. Bounds how long a peer may go without producing the next chunk of the
+    /// archive body once response headers have arrived; see <see cref="DownloadConnectTimeout"/> for the
+    /// earlier connection/redirect phase. Falls back to the obsolete <see cref="DownloadTimeout"/>'s value
+    /// when this property is not itself set explicitly (see that property's remarks).
+    /// </summary>
+    /// <remarks>
+    /// Does not, on its own, bound the transfer as a whole -- see <see cref="MaxTotalDownloadDuration"/> for
+    /// why a per-read idle bound alone cannot do that.
+    /// </remarks>
+    public TimeSpan ReadIdleTimeout
+    {
+        get => _readIdleTimeoutOverride ?? _legacyDownloadTimeout ?? DefaultReadIdleTimeout;
+        init => _readIdleTimeoutOverride = value;
+    }
+
+    /// <summary>
+    /// Gets the timeout duration previously applied to both the connection/redirect phase and the per-read
+    /// idle stall detection of an archive download.
+    /// </summary>
+    /// <remarks>
+    /// Superseded by <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/>, which separate
+    /// those two unrelated roles: ten minutes is a defensible connection deadline but a very slow stall
+    /// detector, so a single value could not be right for both. When set, this property seeds the value of
+    /// whichever of <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/> was not itself
+    /// set explicitly, so existing configuration keeps working. Note this is an observable behaviour
+    /// change for a caller relying solely on the pre-split default: the effective stall timeout drops from
+    /// this property's 10-minute default to <see cref="ReadIdleTimeout"/>'s 120-second default -- see
+    /// CHANGELOG.md. Scheduled for removal in the next major version per the versioning policy in
+    /// CONTRIBUTING.md.
+    /// </remarks>
+    [Obsolete("Use DownloadConnectTimeout (connection/redirect deadline) and ReadIdleTimeout (per-read stall timeout) instead. DownloadTimeout still seeds both when set, but conflates two unrelated roles and will be removed in the next major version.")]
+    public TimeSpan DownloadTimeout
+    {
+        get => _legacyDownloadTimeout ?? DefaultDownloadConnectTimeout;
+        init => _legacyDownloadTimeout = value;
+    }
 
     /// <summary>
     /// Gets the maximum cumulative time an archive transfer may spend waiting on the network, across all
@@ -102,7 +152,7 @@ public sealed record XyoClientConfig
     /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to disable.
     /// </summary>
     /// <remarks>
-    /// <see cref="DownloadTimeout"/> resets on every read, so on its own it bounds nothing cumulative: a peer
+    /// <see cref="ReadIdleTimeout"/> resets on every read, so on its own it bounds nothing cumulative: a peer
     /// delivering a few bytes just inside each idle window keeps the connection and the enumerating task
     /// alive indefinitely, because no individual read ever stalls. The byte bounds
     /// (<see cref="MaxArchiveBytes"/>, <see cref="MaxDecompressedBytes"/>, <see cref="MaxTarEntries"/>) do

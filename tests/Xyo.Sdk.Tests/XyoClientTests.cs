@@ -394,12 +394,12 @@ public class XyoClientTests
     }
 
     [Fact]
-    public async Task StreamEnrichmentCollectionAsync_Timeout_ThrowsXyoNetworkException()
+    public async Task StreamEnrichmentCollectionAsync_TransportFailureDuringConnect_ThrowsXyoNetworkException()
     {
         var handler = new MockHttpMessageHandler((_, _) =>
             throw new TaskCanceledException("The request was canceled due to timeout."));
         using var httpClient = new HttpClient(handler);
-        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromSeconds(20) };
+        var config = new XyoClientConfig("xyo_test_token") { DownloadConnectTimeout = TimeSpan.FromSeconds(20) };
         using var client = new XyoClient(config, httpClient);
 
         var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
@@ -408,7 +408,38 @@ public class XyoClientTests
             {
             }
         });
-        Assert.Contains("Archive download timed out after 20 seconds.", ex.Message);
+        Assert.Contains("connection phase timed out after 20 seconds", ex.Message);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_SlowConnectionPhase_ThrowsAfterDownloadConnectTimeout()
+    {
+        // Gherkin: "A slow connection phase is bounded by the connect timeout" -- a host that accepts the
+        // connection but never returns response headers must fail after approximately
+        // DownloadConnectTimeout, with the exception attributing the failure to the connection phase (not a
+        // stalled read, which is a distinct property bounding a later phase of the same call).
+        var handler = new MockHttpMessageHandler(async (_, ct) =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct).ConfigureAwait(false);
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        });
+        using var httpClient = new HttpClient(handler);
+        var config = new XyoClientConfig("xyo_test_token")
+        {
+            DownloadConnectTimeout = TimeSpan.FromMilliseconds(150),
+            ReadIdleTimeout = TimeSpan.FromSeconds(30)
+        };
+        using var client = new XyoClient(config, httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+            {
+            }
+        });
+
+        Assert.Contains("connection phase", ex.Message);
+        Assert.DoesNotContain("stalled", ex.Message);
     }
 
     [Fact]
@@ -461,15 +492,14 @@ public class XyoClientTests
     }
 
     [Fact]
-    public async Task StreamEnrichmentCollectionAsync_SlowConsumerBetweenRecords_DoesNotCountAgainstDownloadTimeout()
+    public async Task StreamEnrichmentCollectionAsync_SlowConsumerBetweenRecords_DoesNotCountAgainstReadIdleTimeout()
     {
-        // Reproduces the exact scenario a real high-volume pipeline hits: DownloadTimeout is well under
+        // Reproduces the exact scenario a real high-volume pipeline hits: ReadIdleTimeout is well under
         // what 3 records x slow-consumer-processing-per-record would add up to (600ms x 3 = 1800ms > the
-        // 1s DownloadTimeout below), but the network/decompression side is instant. Before the fix, the
-        // single wall-clock deadline spanned the whole enumeration and counted the consumer's own
-        // Task.Delay against the SDK's timeout; after the fix, only production of the next record is
-        // timed, and consumer time between yields is never counted, so this must complete without
-        // throwing regardless of how long the caller takes to process each record.
+        // 1s ReadIdleTimeout below), but the network/decompression side is instant. The idle timer only
+        // measures time spent waiting on the next network read, never the consumer's own processing between
+        // yielded records, so this must complete without throwing regardless of how long the caller takes to
+        // process each record.
         var mockHandler = new MockHttpMessageHandler((_, _) =>
         {
             var response = new HttpResponseMessage(HttpStatusCode.OK)
@@ -479,7 +509,7 @@ public class XyoClientTests
             return Task.FromResult(response);
         });
         using var httpClient = new HttpClient(mockHandler);
-        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromSeconds(1) };
+        var config = new XyoClientConfig("xyo_test_token") { ReadIdleTimeout = TimeSpan.FromSeconds(1) };
         using var client = new XyoClient(config, httpClient);
 
         int received = 0;
@@ -534,8 +564,11 @@ public class XyoClientTests
     [Fact]
     public async Task StreamEnrichmentCollectionAsync_StalledNetworkRead_ThrowsTypedExceptionNotRaw()
     {
-        // Before the fix, a stall while reading the archive body (as opposed to the initial SendAsync)
-        // was outside any exception translation and would have escaped as a raw
+        // Gherkin: "A stalled read is bounded by the read idle timeout" -- a peer that returns headers
+        // promptly then stops sending mid-archive must fail after approximately ReadIdleTimeout, with the
+        // exception attributing the failure to a stalled read (not the connection phase, a distinct
+        // property bounding an earlier phase of the same call). Also verifies a stall while reading the
+        // archive body (as opposed to the initial SendAsync) does not escape as a raw
         // OperationCanceledException/TaskCanceledException, bypassing the SDK's typed exception hierarchy.
         var mockHandler = new MockHttpMessageHandler((_, _) =>
         {
@@ -546,7 +579,11 @@ public class XyoClientTests
             return Task.FromResult(response);
         });
         using var httpClient = new HttpClient(mockHandler);
-        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromMilliseconds(200) };
+        var config = new XyoClientConfig("xyo_test_token")
+        {
+            DownloadConnectTimeout = TimeSpan.FromSeconds(30),
+            ReadIdleTimeout = TimeSpan.FromMilliseconds(200)
+        };
         using var client = new XyoClient(config, httpClient);
 
         var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
@@ -557,6 +594,7 @@ public class XyoClientTests
         });
 
         Assert.Contains("stalled", ex.Message);
+        Assert.DoesNotContain("connection phase", ex.Message);
     }
 
     [Fact]
@@ -884,9 +922,10 @@ public class XyoClientTests
     [Fact]
     public async Task StreamEnrichmentCollectionAsync_SlowContinuousTransfer_NeverStalls_CompletesSuccessfully()
     {
-        // Tests that a continuous stream delivering bytes steadily at intervals shorter than DownloadTimeout
-        // (e.g. 20ms delay per chunk with a 100ms idle timeout, but total duration > 200ms) completes successfully
-        // without false stall timeouts, proving that the idle timer resets on every byte/read.
+        // Gherkin: "A slow but continuous transfer is never treated as a stall" -- a continuous stream
+        // delivering bytes steadily at intervals shorter than ReadIdleTimeout (e.g. 20ms delay per chunk
+        // with a 100ms idle timeout, but total duration > 200ms) completes successfully without false stall
+        // timeouts, proving that the idle timer resets on every byte/read.
         byte[] archiveData = TarGzOfRecords(3);
         var mockHandler = new MockHttpMessageHandler((_, _) =>
         {
@@ -897,7 +936,7 @@ public class XyoClientTests
             return Task.FromResult(response);
         });
         using var httpClient = new HttpClient(mockHandler);
-        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromMilliseconds(100) };
+        var config = new XyoClientConfig("xyo_test_token") { ReadIdleTimeout = TimeSpan.FromMilliseconds(100) };
         using var client = new XyoClient(config, httpClient);
 
         int count = 0;
@@ -927,7 +966,7 @@ public class XyoClientTests
         using var httpClient = new HttpClient(mockHandler);
         var config = new XyoClientConfig("xyo_test_token")
         {
-            DownloadTimeout = TimeSpan.FromMilliseconds(500),         // no single read ever stalls
+            ReadIdleTimeout = TimeSpan.FromMilliseconds(500),         // no single read ever stalls
             MaxTotalDownloadDuration = TimeSpan.FromMilliseconds(300) // but the total does run out
         };
         using var client = new XyoClient(config, httpClient);
@@ -945,8 +984,9 @@ public class XyoClientTests
     [Fact]
     public async Task StreamEnrichmentCollectionAsync_SlowConsumer_DoesNotConsumeTotalDurationBudget()
     {
-        // The total bound accumulates only time spent waiting on the network, so a caller that takes far
-        // longer than MaxTotalDownloadDuration to process the records it is handed must still succeed.
+        // Gherkin: "Consumer processing time is not counted against either timeout" -- the total bound
+        // accumulates only time spent waiting on the network, so a caller that takes far longer than
+        // MaxTotalDownloadDuration to process the records it is handed must still succeed.
         var mockHandler = new MockHttpMessageHandler((_, _) =>
         {
             var response = new HttpResponseMessage(HttpStatusCode.OK)
@@ -958,7 +998,7 @@ public class XyoClientTests
         using var httpClient = new HttpClient(mockHandler);
         var config = new XyoClientConfig("xyo_test_token")
         {
-            DownloadTimeout = TimeSpan.FromSeconds(5),
+            ReadIdleTimeout = TimeSpan.FromSeconds(5),
             MaxTotalDownloadDuration = TimeSpan.FromMilliseconds(200)
         };
         using var client = new XyoClient(config, httpClient);

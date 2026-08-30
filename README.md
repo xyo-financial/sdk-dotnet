@@ -138,6 +138,38 @@ IReadOnlyList<EnrichmentResponse> results = await client.DownloadEnrichmentColle
 Console.WriteLine($"Downloaded {results.Count} enriched records.");
 ```
 
+### 3a. Archive Download Timeouts
+
+Archive downloads (`StreamEnrichmentCollectionAsync` / `DownloadEnrichmentCollectionAsync`) are governed by
+three independent timeouts, since a single value cannot correctly bound both a connection deadline and a
+stall detector:
+
+| Property | Default | Bounds |
+| :--- | :--- | :--- |
+| `DownloadConnectTimeout` | 10 minutes | Establishing the connection, following redirects, and receiving response headers. |
+| `ReadIdleTimeout` | 120 seconds | A single read while streaming the archive body; reset on every read, so a slow but continuous transfer is never treated as a stall. |
+| `MaxTotalDownloadDuration` | 1 hour | The cumulative time spent waiting on the network across the whole transfer, so a peer that drips a few bytes just inside every idle window cannot hold the connection open indefinitely. |
+
+None of the three counts time your own code spends processing a yielded record between reads, so a slow
+consumer is never penalised.
+
+```csharp
+var config = new XyoClientConfig("xyo_api_key")
+{
+    DownloadConnectTimeout = TimeSpan.FromMinutes(2),
+    ReadIdleTimeout = TimeSpan.FromSeconds(30),
+    MaxTotalDownloadDuration = TimeSpan.FromMinutes(20)
+};
+```
+
+> **⚠️ Behaviour change:** the previous single `DownloadTimeout` property (still present but obsolete)
+> defaulted to 10 minutes and served as both the connection deadline and the read-stall timeout. It is
+> superseded by `DownloadConnectTimeout` (10 minutes, unchanged) and `ReadIdleTimeout` (120 seconds). If you
+> relied on the old default for stall detection, a peer that previously had 10 minutes to produce the next
+> byte is now dropped after 2 minutes. Set `ReadIdleTimeout` explicitly if your environment needs a longer
+> allowance. `DownloadTimeout`, when set, still seeds both replacement properties for backward compatibility,
+> but is scheduled for removal in the next major version.
+
 ### 4. Dynamic Token Rotation (Key Vault / Secrets Manager)
 
 Configure an asynchronous key supplier for zero-downtime secret rotation:
