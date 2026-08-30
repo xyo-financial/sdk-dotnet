@@ -13,6 +13,8 @@ using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Xyo.Generated.Api;
 using Xyo.Generated.Client;
 using Xyo.Generated.Model;
@@ -63,10 +65,35 @@ public sealed class XyoClient : IXyoClient
         options.Converters.Add(new ErrorResponseJsonConverter());
         return options;
     }
-    private readonly XyoClientConfig _config;
+    /// <summary>
+    /// Immutable snapshot pairing a <see cref="XyoClientConfig"/> with the <see cref="DownloadSecurityPolicy"/>
+    /// derived from it, so the two are always swapped together atomically on a configuration reload -- a
+    /// <see cref="DownloadSecurityPolicy"/> built from a stale <c>BaseUrl</c>/<c>TrustedDownloadHosts</c> pair
+    /// would validate archive downloads against the wrong allowlist.
+    /// </summary>
+    private sealed class ConfigState
+    {
+        public ConfigState(XyoClientConfig config)
+        {
+            Config = config;
+            SecurityPolicy = new DownloadSecurityPolicy(config.BaseUrl, config.TrustedDownloadHosts);
+        }
+
+        public XyoClientConfig Config { get; }
+
+        public DownloadSecurityPolicy SecurityPolicy { get; }
+    }
+
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
-    private readonly DownloadSecurityPolicy _securityPolicy;
+    private readonly ILogger<XyoClient>? _logger;
+    private readonly IDisposable? _optionsChangeSubscription;
+
+    // Reference reassignment of a `volatile` field is atomic and immediately visible across threads, so a
+    // reader always observes either the previous ConfigState or the fully-constructed replacement, never a
+    // torn mix of an old Config with a new SecurityPolicy (or vice versa). See OnOptionsChanged.
+    private volatile ConfigState _state;
+
     private int _disposed; // 0 = not disposed, 1 = disposed; mutated only via Interlocked, see Dispose()
 
     /// <summary>
@@ -80,24 +107,39 @@ public sealed class XyoClient : IXyoClient
     /// Initializes a new instance of the <see cref="XyoClient"/> class with a custom configuration.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// When <paramref name="httpClient"/> is supplied by the caller (or via DI), the SDK does not own its
     /// handler and cannot force <c>AllowAutoRedirect = false</c> on it. Egress/SSRF validation on archive
     /// downloads (see <see cref="DownloadSecurityPolicy"/>) is only guaranteed complete when the SDK
     /// constructs its own <see cref="HttpClient"/> (i.e. <paramref name="httpClient"/> is <c>null</c>) or
     /// when the caller's handler also disables automatic redirects.
+    /// </para>
+    /// <para>
+    /// <paramref name="config"/> is read once, here, and never re-read afterwards: an instance constructed
+    /// through this constructor is fixed for its lifetime and does not observe later mutation of the
+    /// <see cref="XyoClientConfig"/> instance passed in (it is a record, so callers cannot mutate it anyway)
+    /// nor any configuration source. This is the only reload behaviour a hand-constructed
+    /// <see cref="XyoClient"/> gets; the DI-registered client obtained via
+    /// <see cref="Xyo.Sdk.Extensions.ServiceCollectionExtensions.AddXyoClient(Microsoft.Extensions.DependencyInjection.IServiceCollection,Action{XyoClientOptions})"/>
+    /// additionally tracks <c>IOptionsMonitor&lt;XyoClientOptions&gt;</c> reloads -- see the internal
+    /// constructor below.
+    /// </para>
     /// </remarks>
     public XyoClient(XyoClientConfig config, HttpClient? httpClient = null)
     {
-        _config = config ?? throw new ArgumentNullException(nameof(config));
+        if (config == null)
+        {
+            throw new ArgumentNullException(nameof(config));
+        }
 
         // BaseUrl's ambient default (XYO_API_BASE_URL) is deliberately NOT validated at config
         // construction time, so a bad environment variable can never preempt an explicit BaseUrl
         // override -- see the comment on XyoClientConfig's `_baseUrl` field initializer. That means the
         // effective value must be validated here instead, the first point where we know for certain
         // whether an override was supplied.
-        XyoClientConfig.ValidateEffectiveBaseUrl(_config.BaseUrl, "XyoClientConfig.BaseUrl", nameof(config));
+        XyoClientConfig.ValidateEffectiveBaseUrl(config.BaseUrl, "XyoClientConfig.BaseUrl", nameof(config));
 
-        _securityPolicy = new DownloadSecurityPolicy(_config.BaseUrl, _config.TrustedDownloadHosts);
+        _state = new ConfigState(config);
 
         if (httpClient != null)
         {
@@ -126,6 +168,76 @@ public sealed class XyoClient : IXyoClient
             _ownsHttpClient = true;
         }
     }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="XyoClient"/> class that tracks live
+    /// <see cref="XyoClientOptions"/> reloads via <paramref name="optionsMonitor"/>. Used exclusively by
+    /// <see cref="Xyo.Sdk.Extensions.ServiceCollectionExtensions.AddXyoClient(Microsoft.Extensions.DependencyInjection.IServiceCollection,Action{XyoClientOptions})"/>
+    /// so the DI-registered singleton observes <c>appsettings.json</c> changes without ever being
+    /// reconstructed (its lifetime, and the container's <see cref="IDisposable"/> tracking of it, stay
+    /// singleton -- see EPIC-004 / US-DOTNET-004).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The current <see cref="XyoClientConfig"/> is cached in <see cref="_state"/> and rebuilt only when
+    /// <paramref name="optionsMonitor"/> raises its change token, never per call, so every SDK call after the
+    /// first pays only a single volatile field read on the hot path.
+    /// </para>
+    /// <para>
+    /// A reload that fails <see cref="XyoClientOptions.ToConfig"/> validation (e.g. an invalid
+    /// <c>BaseUrl</c>) is rejected in <see cref="OnOptionsChanged"/>: the client keeps serving requests
+    /// against its last valid configuration, and the failure is logged via <paramref name="logger"/> rather
+    /// than swallowed or allowed to fault the change-notification thread.
+    /// </para>
+    /// </remarks>
+    internal XyoClient(IOptionsMonitor<XyoClientOptions> optionsMonitor, HttpClient httpClient, ILogger<XyoClient>? logger = null)
+        : this((optionsMonitor ?? throw new ArgumentNullException(nameof(optionsMonitor))).CurrentValue.ToConfig(), httpClient)
+    {
+        _logger = logger;
+        _optionsChangeSubscription = optionsMonitor.OnChange(OnOptionsChanged);
+    }
+
+    /// <summary>
+    /// Applies (or rejects) a live <see cref="XyoClientOptions"/> reload reported by
+    /// <see cref="IOptionsMonitor{TOptions}.OnChange(Action{TOptions,string})"/>.
+    /// </summary>
+    /// <remarks>
+    /// Runs on whatever thread the options change-token infrastructure invokes it on (typically a thread
+    /// pool thread reacting to a file-system watcher), so an unhandled exception here would fault that
+    /// thread rather than any caller of the SDK. Every exception is therefore caught: a validation failure
+    /// (<see cref="ArgumentException"/> from <see cref="XyoClientOptions.ToConfig"/>) is the expected,
+    /// documented outcome of a bad edit to <c>appsettings.json</c> and is logged at
+    /// <see cref="LogLevel.Error"/>; anything else is logged at the same level as a defensive backstop. In
+    /// both cases <see cref="_state"/> is left untouched, so in-flight and subsequent calls keep using the
+    /// last configuration that validated successfully.
+    /// </remarks>
+    private void OnOptionsChanged(XyoClientOptions options, string? name)
+    {
+        XyoClientConfig newConfig;
+        try
+        {
+            newConfig = options.ToConfig();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex,
+                "XyoClientOptions reload was rejected: {Message}. XyoClient continues serving requests with its last valid configuration.",
+                ex.Message);
+            OptionsReloadFailed?.Invoke(this, ex);
+            return;
+        }
+
+        _state = new ConfigState(newConfig);
+        _logger?.LogInformation("XyoClientOptions reload applied; XyoClient is now using the updated configuration.");
+    }
+
+    /// <summary>
+    /// Raised when an <see cref="IOptionsMonitor{TOptions}"/> reload is rejected by validation. Not part of
+    /// the public API surface: production observability goes through the <see cref="ILogger"/> passed to the
+    /// internal constructor, and this event exists solely so tests can assert deterministically that a
+    /// rejected reload is surfaced rather than silently swallowed.
+    /// </summary>
+    internal event EventHandler<Exception>? OptionsReloadFailed;
 
     /// <inheritdoc />
     public Task<EnrichmentResponse> EnrichTransactionAsync(string content, string countryCode, CancellationToken cancellationToken = default)
@@ -171,17 +283,20 @@ public sealed class XyoClient : IXyoClient
         ValidateTransactionInput(request.Content, request.CountryCode, out string normalizedCountryCode);
         var effectiveRequest = new EnrichmentRequest(request.Content, normalizedCountryCode);
 
-        string token = await _config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
+        // Snapshotted once, so a config reload landing mid-call cannot mix an old BaseUrl with a new
+        // Timeout (or vice versa) within the same request -- see ConfigState.
+        ConfigState state = _state;
+        string token = await state.Config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
 
-        var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{_config.BaseUrl}/v1/ai/finance/enrichment/transaction");
+        var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{state.Config.BaseUrl}/v1/ai/finance/enrichment/transaction");
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-        ApplyDefaultHeaders(httpRequest, correlationId, traceparent);
+        ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent);
 
         httpRequest.Content = JsonContent.Create(effectiveRequest, options: DefaultJsonOptions);
 
-        using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+        using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, state.Config, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
 
         var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -254,9 +369,10 @@ public sealed class XyoClient : IXyoClient
 
         ValidateApiUser(apiUser);
 
-        string token = await _config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
+        ConfigState state = _state;
+        string token = await state.Config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
 
-        var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{_config.BaseUrl}/v1/ai/finance/enrichment/transactions");
+        var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{state.Config.BaseUrl}/v1/ai/finance/enrichment/transactions");
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
@@ -265,11 +381,11 @@ public sealed class XyoClient : IXyoClient
             httpRequest.Headers.Add("x-api-user", apiUser.Trim());
         }
 
-        ApplyDefaultHeaders(httpRequest, correlationId, traceparent);
+        ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent);
 
         httpRequest.Content = JsonContent.Create(effective, options: DefaultJsonOptions);
 
-        using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+        using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, state.Config, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
 
         var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -312,13 +428,14 @@ public sealed class XyoClient : IXyoClient
 
         ValidateApiUser(apiUser);
 
-        string token = await _config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
+        ConfigState state = _state;
+        string token = await state.Config.ResolveTokenAsync(cancellationToken).ConfigureAwait(false);
 
         // The specification declares GET /v1/ai/finance/enrichment/status/{id}, with the work
         // identifier as a path parameter rather than a query value. EscapeDataString is the
         // correct escape for a path segment: unlike a query value it also escapes '/', so an
         // identifier containing a slash cannot inject additional path segments.
-        var statusUri = new Uri($"{_config.BaseUrl}/v1/ai/finance/enrichment/status/{Uri.EscapeDataString(id.Trim())}");
+        var statusUri = new Uri($"{state.Config.BaseUrl}/v1/ai/finance/enrichment/status/{Uri.EscapeDataString(id.Trim())}");
 
         var httpRequest = new HttpRequestMessage(HttpMethod.Get, statusUri);
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -329,9 +446,9 @@ public sealed class XyoClient : IXyoClient
             httpRequest.Headers.Add("x-api-user", apiUser.Trim());
         }
 
-        ApplyDefaultHeaders(httpRequest, correlationId, traceparent);
+        ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent);
 
-        using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+        using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, state.Config, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessResponseAsync(response, cancellationToken).ConfigureAwait(false);
 
         var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -366,13 +483,17 @@ public sealed class XyoClient : IXyoClient
     {
         ThrowIfDisposed();
 
-        Uri validatedUri = _securityPolicy.ValidateDownloadUrl(downloadUrl);
+        // Snapshotted once and used for the entire operation (every redirect hop, the download, and the
+        // decompression below), so a config reload landing mid-download cannot validate a redirect hop
+        // against a stale SecurityPolicy while enforcing a newer DownloadTimeout, or vice versa.
+        ConfigState state = _state;
+        Uri validatedUri = state.SecurityPolicy.ValidateDownloadUrl(downloadUrl);
         HttpResponseMessage? response = null;
 
         // DownloadConnectTimeout bounds only the connection/redirect phase (every redirect hop up to and
         // including receiving response headers), independently of both the shorter unary-call Timeout (see
         // SendRequestAsync) and the per-read idle bound applied to the archive body below (ReadIdleTimeout).
-        using var timeoutCts = new CancellationTokenSource(_config.DownloadConnectTimeout);
+        using var timeoutCts = new CancellationTokenSource(state.Config.DownloadConnectTimeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
         CancellationToken effectiveToken = linkedCts.Token;
 
@@ -390,14 +511,14 @@ public sealed class XyoClient : IXyoClient
                 // external one or vice versa. Neither the Bearer token, nor X-Correlation-ID/traceparent
                 // (live trace/span IDs), nor DefaultHeaders (which may carry caller secrets like an
                 // internal API key) are sent to external storage hosts.
-                bool isExternalStorage = _securityPolicy.IsExternalStorageHost(validatedUri.Host);
+                bool isExternalStorage = state.SecurityPolicy.IsExternalStorageHost(validatedUri.Host);
                 if (!isExternalStorage)
                 {
-                    string token = await _config.ResolveTokenAsync(effectiveToken).ConfigureAwait(false);
+                    string token = await state.Config.ResolveTokenAsync(effectiveToken).ConfigureAwait(false);
                     httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 }
 
-                ApplyDefaultHeaders(httpRequest, includeInternalOnlyHeaders: !isExternalStorage);
+                ApplyDefaultHeaders(httpRequest, state.Config, includeInternalOnlyHeaders: !isExternalStorage);
 
                 try
                 {
@@ -406,7 +527,7 @@ public sealed class XyoClient : IXyoClient
                 catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     throw new XyoNetworkException(
-                        $"Archive download connection phase timed out after {_config.DownloadConnectTimeout.TotalSeconds} " +
+                        $"Archive download connection phase timed out after {state.Config.DownloadConnectTimeout.TotalSeconds} " +
                         "seconds while establishing the connection, following redirects, or waiting for response headers.", ex);
                 }
                 catch (OperationCanceledException)
@@ -442,7 +563,7 @@ public sealed class XyoClient : IXyoClient
 
                 // Re-run the full allowlist/scheme validation on the redirect target -- this is the control
                 // that stops a trusted host's 3xx from silently sending the client anywhere else (SSRF).
-                validatedUri = _securityPolicy.ValidateDownloadUrl(nextUri.ToString());
+                validatedUri = state.SecurityPolicy.ValidateDownloadUrl(nextUri.ToString());
             }
 
             try
@@ -452,7 +573,7 @@ public sealed class XyoClient : IXyoClient
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new XyoNetworkException(
-                    $"Archive download connection phase timed out after {_config.DownloadConnectTimeout.TotalSeconds} " +
+                    $"Archive download connection phase timed out after {state.Config.DownloadConnectTimeout.TotalSeconds} " +
                     "seconds while establishing the connection, following redirects, or waiting for response headers.", ex);
             }
 
@@ -470,16 +591,16 @@ public sealed class XyoClient : IXyoClient
             // `using` on `responseStream` above already owns its lifetime.
             using var idleStream = new IdleTimeoutStream(
                 responseStream,
-                _config.ReadIdleTimeout,
-                _config.MaxTotalDownloadDuration,
+                state.Config.ReadIdleTimeout,
+                state.Config.MaxTotalDownloadDuration,
                 leaveOpen: true);
 
             await foreach (var item in TarStreamReader.StreamArchiveAsync(
                 idleStream,
-                _config.MaxArchiveBytes,
-                _config.MaxDecompressedBytes,
-                _config.MaxEntryBytes,
-                _config.MaxTarEntries,
+                state.Config.MaxArchiveBytes,
+                state.Config.MaxDecompressedBytes,
+                state.Config.MaxEntryBytes,
+                state.Config.MaxTarEntries,
                 cancellationToken).ConfigureAwait(false))
             {
                 yield return item;
@@ -492,6 +613,11 @@ public sealed class XyoClient : IXyoClient
     }
 
     /// <param name="request">The outbound request to attach headers to.</param>
+    /// <param name="config">
+    /// The <see cref="XyoClientConfig"/> snapshot the calling method captured at the start of the operation
+    /// (see <see cref="ConfigState"/>), so a config reload mid-call cannot mix its default headers with a
+    /// BaseUrl or timeout read from a different snapshot.
+    /// </param>
     /// <param name="correlationId">Per-call correlation ID override; falls back to the configured default.</param>
     /// <param name="traceparent">Per-call traceparent override; falls back to the configured default.</param>
     /// <param name="includeInternalOnlyHeaders">
@@ -501,14 +627,14 @@ public sealed class XyoClient : IXyoClient
     /// (e.g. an internal API key), neither of which should follow the request to a third party any more
     /// than the Bearer token does.
     /// </param>
-    private void ApplyDefaultHeaders(HttpRequestMessage request, string? correlationId = null, string? traceparent = null, bool includeInternalOnlyHeaders = true)
+    private static void ApplyDefaultHeaders(HttpRequestMessage request, XyoClientConfig config, string? correlationId = null, string? traceparent = null, bool includeInternalOnlyHeaders = true)
     {
         if (!includeInternalOnlyHeaders)
         {
             return;
         }
 
-        string? effectiveCorrelationId = !string.IsNullOrWhiteSpace(correlationId) ? correlationId : _config.CorrelationId;
+        string? effectiveCorrelationId = !string.IsNullOrWhiteSpace(correlationId) ? correlationId : config.CorrelationId;
         if (!string.IsNullOrWhiteSpace(effectiveCorrelationId))
         {
             ValidateHeaderValue(effectiveCorrelationId, nameof(correlationId));
@@ -518,7 +644,7 @@ public sealed class XyoClient : IXyoClient
             }
         }
 
-        string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : _config.Traceparent;
+        string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : config.Traceparent;
         if (!string.IsNullOrWhiteSpace(effectiveTraceparent))
         {
             ValidateHeaderValue(effectiveTraceparent, nameof(traceparent));
@@ -533,7 +659,7 @@ public sealed class XyoClient : IXyoClient
             }
         }
 
-        foreach (var (key, value) in _config.DefaultHeaders)
+        foreach (var (key, value) in config.DefaultHeaders)
         {
             if (!request.Headers.NonValidated.Contains(key))
             {
@@ -636,9 +762,10 @@ public sealed class XyoClient : IXyoClient
     private async Task<HttpResponseMessage> SendRequestAsync(
         HttpRequestMessage request,
         HttpCompletionOption completionOption,
+        XyoClientConfig config,
         CancellationToken cancellationToken)
     {
-        using var timeoutCts = new CancellationTokenSource(_config.Timeout);
+        using var timeoutCts = new CancellationTokenSource(config.Timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
         try
@@ -647,7 +774,7 @@ public sealed class XyoClient : IXyoClient
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new XyoNetworkException($"Network request timed out after {_config.Timeout.TotalSeconds} seconds.", ex);
+            throw new XyoNetworkException($"Network request timed out after {config.Timeout.TotalSeconds} seconds.", ex);
         }
         catch (OperationCanceledException)
         {
@@ -858,7 +985,9 @@ public sealed class XyoClient : IXyoClient
     }
 
     /// <summary>
-    /// Disposes the underlying HttpClient if owned by this client.
+    /// Disposes the underlying HttpClient if owned by this client, and unsubscribes from
+    /// <see cref="IOptionsMonitor{TOptions}"/> reload notifications if this instance was constructed to
+    /// track them.
     /// </summary>
     public void Dispose()
     {
@@ -867,6 +996,8 @@ public sealed class XyoClient : IXyoClient
         // partially-disposed state (the plain bool check-then-act this replaced had that gap).
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _optionsChangeSubscription?.Dispose();
+
             if (_ownsHttpClient)
             {
                 _httpClient.Dispose();

@@ -257,6 +257,12 @@ app.Run();
 public record EnrichmentDto(string Description, string CountryCode);
 ```
 
+#### Configuration Reload Behaviour
+
+`IXyoClient` is registered as a singleton, and stays a singleton -- this is deliberate (an earlier `AddTransient` registration leaked, because `IXyoClient` is `IDisposable` and the container captured every instance resolved from the root provider). Despite that, the resolved client **does** observe later changes to `XyoClientOptions`, for example a reload of the `appsettings.json` section it is bound from. `AddXyoClient` resolves `IOptionsMonitor<XyoClientOptions>` rather than a one-shot `IOptions<XyoClientOptions>`, and rebuilds its effective configuration only when the change token fires, never per call, so there is no cost added to the request hot path. A reload that fails validation (for example an invalid `BaseUrl`) is rejected: the client keeps serving requests with its last valid configuration, and the failure is logged rather than swallowed or allowed to crash the process.
+
+This reload behaviour is specific to the `Action<XyoClientOptions>` overload (and the `string apiKey` overload, which delegates to it). The `AddXyoClient(XyoClientConfig)` overload takes an explicit, already-built configuration with no options source behind it, so it is read once and fixed for the lifetime of the registration -- there is nothing for it to reload from.
+
 ### 2. High-Performance Architectural Highlights
 
 | Architecture Dimension | Implementation Mechanism | Enterprise Benefit |

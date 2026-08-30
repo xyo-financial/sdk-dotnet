@@ -8,6 +8,25 @@ namespace Xyo.Sdk.Client;
 /// <summary>
 /// Options class for configuring <see cref="XyoClient"/> via ASP.NET Core and Microsoft.Extensions.DependencyInjection.
 /// </summary>
+/// <remarks>
+/// <b>Configuration lifetime when registered via
+/// <see cref="Extensions.ServiceCollectionExtensions.AddXyoClient(Microsoft.Extensions.DependencyInjection.IServiceCollection,System.Action{XyoClientOptions})"/>:</b>
+/// the singleton <c>IXyoClient</c> this method registers does observe later changes to this options type,
+/// including a reload of the section it is bound from (e.g. <c>appsettings.json</c>). It is not read once and
+/// frozen; the SDK subscribes to <see cref="Microsoft.Extensions.Options.IOptionsMonitor{TOptions}"/> and
+/// rebuilds its effective <see cref="XyoClientConfig"/> whenever the change token fires, which the next SDK
+/// call then uses -- no restart, and no new client instance is ever constructed. A reload that fails
+/// <see cref="ToConfig"/> validation (e.g. an invalid <see cref="BaseUrl"/>) does not take effect: the client
+/// keeps serving requests with its last valid configuration, and the failure is logged rather than swallowed.
+/// See <see cref="Extensions.ServiceCollectionExtensions.AddXyoClient(Microsoft.Extensions.DependencyInjection.IServiceCollection,System.Action{XyoClientOptions})"/>
+/// for the full design decision (EPIC-004 / US-DOTNET-004).
+/// <para>
+/// This lifetime applies only to that registration path. An <see cref="XyoClientConfig"/> passed directly to
+/// <see cref="XyoClient(XyoClientConfig,System.Net.Http.HttpClient)"/>, or via
+/// <see cref="Extensions.ServiceCollectionExtensions.AddXyoClient(Microsoft.Extensions.DependencyInjection.IServiceCollection,XyoClientConfig)"/>,
+/// is read once and is fixed for the lifetime of that client -- there is no options source for it to reload from.
+/// </para>
+/// </remarks>
 public sealed class XyoClientOptions
 {
     private TimeSpan? _downloadTimeout;
