@@ -524,6 +524,11 @@ public sealed class XyoClient : IXyoClient
     private const int MaxUnaryResponseChars = 1_048_576; // 1 MiB, ~8x the largest plausible batch receipt
 
     /// <summary>
+    /// How much of an oversized response body is kept as a diagnostic prefix on the thrown exception.
+    /// </summary>
+    private const int OversizeDiagnosticChars = 512;
+
+    /// <summary>
     /// Deserializes a response body, translating malformed-payload failures (e.g. a required field the
     /// server sent as null) into a typed <see cref="XyoServerException"/> instead of letting a raw
     /// <see cref="System.Text.Json.JsonException"/> or <see cref="ArgumentException"/> escape.
@@ -543,11 +548,19 @@ public sealed class XyoClient : IXyoClient
             totalRead = await reader.ReadBlockAsync(buffer.AsMemory(0, MaxUnaryResponseChars), cancellationToken).ConfigureAwait(false);
 
             // Verify there is no excess content past the maximum allowed unary response size
-            var oneChar = new char[1];
-            if (totalRead == MaxUnaryResponseChars && await reader.ReadAsync(oneChar.AsMemory(0, 1), cancellationToken).ConfigureAwait(false) > 0)
+            if (totalRead == MaxUnaryResponseChars)
             {
-                throw new XyoServerException(statusCode,
-                    $"API response exceeded the maximum supported size of {MaxUnaryResponseChars} characters.");
+                var oneChar = new char[1];
+                if (await reader.ReadAsync(oneChar.AsMemory(0, 1), cancellationToken).ConfigureAwait(false) > 0)
+                {
+                    // Carry a bounded, log-safe prefix so the failure is diagnosable: whether this was a
+                    // gateway HTML error page, a truncated proxy response, or a genuinely oversized payload
+                    // is otherwise unanswerable without reproducing the call under a packet capture.
+                    string prefix = FlattenControlCharacters(new string(buffer, 0, Math.Min(totalRead, OversizeDiagnosticChars)));
+                    throw new XyoServerException(statusCode,
+                        $"API response exceeded the maximum supported size of {MaxUnaryResponseChars} characters.",
+                        rawResponseBody: prefix);
+                }
             }
 
             raw = new string(buffer, 0, totalRead);

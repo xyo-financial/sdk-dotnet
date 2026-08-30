@@ -906,6 +906,25 @@ public class XyoClientTests
     }
 
     [Fact]
+    public async Task EnrichTransactionAsync_ExceedingUnarySizeCap_AttachesBoundedDiagnosticPrefix()
+    {
+        // Rejecting an oversized body without keeping any of it leaves an operator unable to tell a gateway
+        // HTML error page from a truncated proxy response from a genuinely large payload.
+        string oversized = "<html><body>502 Bad Gateway from edge-proxy-7</body></html>"
+            + new string('A', 2 * 1024 * 1024);
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, oversized);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+
+        Assert.Contains("exceeded the maximum supported size", ex.Message);
+        Assert.NotNull(ex.RawResponseBody);
+        Assert.Contains("502 Bad Gateway from edge-proxy-7", ex.RawResponseBody);
+        Assert.True(ex.RawResponseBody!.Length <= 512, $"diagnostic prefix must stay bounded, was {ex.RawResponseBody.Length}");
+    }
+
+    [Fact]
     public async Task EnrichTransactionAsync_ExceedingUnarySizeCap_ThrowsXyoServerException()
     {
         // 2 MB of data returned with 200 OK (e.g. gateway HTML error page with Content-Type application/json)
