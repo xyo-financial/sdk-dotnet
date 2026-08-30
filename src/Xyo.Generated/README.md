@@ -6,7 +6,7 @@ Create a config.yaml file similar to what is below, then run the following power
 
 ```yaml
 generatorName: csharp
-inputSpec: ../specs/openapi.yml
+inputSpec: specs/openapi.yml
 outputDir: out
 
 # https://openapi-generator.tech/docs/generators/csharp
@@ -108,7 +108,7 @@ namespace YourProject
 
 ## Api Information
 - appName: XYO RESTful Transaction Enrichment API
-- appVersion: 2.0.0
+- appVersion: 2.0.3
 - appDescription: RESTful API for enriching financial transactions.
 
 ## Build
