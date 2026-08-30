@@ -906,6 +906,61 @@ public class XyoClientTests
     }
 
     [Fact]
+    public async Task IdleTimeoutStream_LeaveOpen_DoesNotDisposeAStreamItDoesNotOwn()
+    {
+        var inner = new DisposeCountingStream(new byte[] { 1, 2, 3, 4 });
+
+        var borrowed = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1), leaveOpen: true);
+        borrowed.Dispose();
+        await borrowed.DisposeAsync();
+
+        Assert.Equal(0, inner.DisposeCount);
+
+        var owning = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1), leaveOpen: false);
+        owning.Dispose();
+
+        Assert.Equal(1, inner.DisposeCount);
+    }
+
+    private sealed class DisposeCountingStream : Stream
+    {
+        private readonly byte[] _data;
+        private int _position;
+
+        public DisposeCountingStream(byte[] data) => _data = data;
+
+        public int DisposeCount { get; private set; }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            int toCopy = Math.Min(buffer.Length, _data.Length - _position);
+            _data.AsSpan(_position, toCopy).CopyTo(buffer.Span);
+            _position += toCopy;
+            return ValueTask.FromResult(toCopy);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                DisposeCount++;
+            }
+            base.Dispose(disposing);
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
     public void IdleTimeoutStream_SynchronousRead_ThrowsNotSupportedRatherThanReadingUntimed()
     {
         // Stream.Read takes no CancellationToken, so the idle timeout cannot be enforced on a synchronous

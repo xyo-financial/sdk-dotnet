@@ -451,7 +451,8 @@ public sealed class XyoClient : IXyoClient
             await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
 
             using var responseStream = await response!.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using var idleStream = new IdleTimeoutStream(responseStream, _config.DownloadTimeout);
+            // leaveOpen because the `using` on `responseStream` above already owns its lifetime.
+            using var idleStream = new IdleTimeoutStream(responseStream, _config.DownloadTimeout, leaveOpen: true);
 
             await foreach (var item in TarStreamReader.StreamArchiveAsync(
                 idleStream,
@@ -896,12 +897,21 @@ public sealed class XyoClient : IXyoClient
     internal sealed class IdleTimeoutStream : Stream
     {
         private readonly Stream _inner;
+        private readonly bool _leaveOpen;
         private readonly TimeSpan _idleTimeout;
 
-        public IdleTimeoutStream(Stream inner, TimeSpan idleTimeout)
+        /// <param name="inner">The stream to read through.</param>
+        /// <param name="idleTimeout">Maximum time a single read may wait before it is treated as a stall.</param>
+        /// <param name="leaveOpen">
+        /// When true (the default) disposing this stream does not dispose <paramref name="inner"/>. The
+        /// wrapper is handed a stream it does not own, matching <c>BoundedReadStream</c> and the
+        /// <c>leaveOpen: true</c> convention used by the rest of the archive pipeline.
+        /// </param>
+        public IdleTimeoutStream(Stream inner, TimeSpan idleTimeout, bool leaveOpen = true)
         {
             _inner = inner ?? throw new ArgumentNullException(nameof(inner));
             _idleTimeout = idleTimeout;
+            _leaveOpen = leaveOpen;
         }
 
         public override bool CanRead => _inner.CanRead;
@@ -951,7 +961,7 @@ public sealed class XyoClient : IXyoClient
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing)
+            if (disposing && !_leaveOpen)
             {
                 _inner.Dispose();
             }
@@ -960,7 +970,10 @@ public sealed class XyoClient : IXyoClient
 
         public override async ValueTask DisposeAsync()
         {
-            await _inner.DisposeAsync().ConfigureAwait(false);
+            if (!_leaveOpen)
+            {
+                await _inner.DisposeAsync().ConfigureAwait(false);
+            }
             await base.DisposeAsync().ConfigureAwait(false);
         }
     }
