@@ -535,10 +535,12 @@ public sealed class XyoClient : IXyoClient
         // on malformed or unexpected oversized responses (e.g. gateway HTML error pages).
         char[] buffer = ArrayPool<char>.Shared.Rent(MaxUnaryResponseChars);
         string raw;
+        int totalRead = 0;
+        bool readCompleted = false;
         try
         {
             using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: false);
-            int totalRead = await reader.ReadBlockAsync(buffer.AsMemory(0, MaxUnaryResponseChars), cancellationToken).ConfigureAwait(false);
+            totalRead = await reader.ReadBlockAsync(buffer.AsMemory(0, MaxUnaryResponseChars), cancellationToken).ConfigureAwait(false);
 
             // Verify there is no excess content past the maximum allowed unary response size
             var oneChar = new char[1];
@@ -549,10 +551,17 @@ public sealed class XyoClient : IXyoClient
             }
 
             raw = new string(buffer, 0, totalRead);
+            readCompleted = true;
         }
         finally
         {
-            ArrayPool<char>.Shared.Return(buffer, clearArray: true);
+            // Scrub only the region actually written, rather than asking the pool to zero the whole 1 MiB
+            // rental. A typical enrichment response is a few hundred characters, so `clearArray: true` was a
+            // 2 MB memset on every unary call (~15.7us measured) to erase bytes nobody wrote. On a faulted
+            // read the written extent is unknown, so the full rental is scrubbed: response data must never
+            // be handed back to a process-wide pool.
+            Array.Clear(buffer, 0, readCompleted ? totalRead : buffer.Length);
+            ArrayPool<char>.Shared.Return(buffer, clearArray: false);
         }
 
         T? result;
