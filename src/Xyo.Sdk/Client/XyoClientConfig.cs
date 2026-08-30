@@ -302,7 +302,7 @@ public sealed record XyoClientConfig
     }
 
     /// <summary>
-    /// Validates and normalizes a candidate base URL: must be an absolute URI with no user info, query, or
+    /// Validates and normalises a candidate base URL: must be an absolute URI with no user info, query, or
     /// fragment component, HTTPS unless the host is loopback, with any trailing slash trimmed. Mirrors the
     /// scheme/loopback rules in <see cref="Security.DownloadSecurityPolicy"/> so the same policy governs
     /// where the Bearer token is sent for API calls as for archive downloads.
@@ -405,7 +405,7 @@ public sealed record XyoClientConfig
     /// <c>Dictionary</c> by reference), so a caller mutating that dictionary after construction -- e.g.
     /// still holding the <see cref="XyoClientOptions"/> instance used to build a singleton-registered
     /// <see cref="XyoClient"/> -- bypassed validation entirely for every request made afterward. The copy
-    /// also normalizes the comparer to <see cref="StringComparer.OrdinalIgnoreCase"/> regardless of what
+    /// also normalises the comparer to <see cref="StringComparer.OrdinalIgnoreCase"/> regardless of what
     /// the caller's dictionary used, matching this type's own default.
     /// </remarks>
     private static IReadOnlyDictionary<string, string> ValidateDefaultHeaders(IReadOnlyDictionary<string, string> headers)

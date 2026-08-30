@@ -231,8 +231,8 @@ public sealed class XyoClient : IXyoClient
             throw new ArgumentException($"Transaction collection batch size of {requestList.Count} exceeds maximum limit of 50,000 items.", nameof(requests));
         }
 
-        // Only materializes a copy on the first divergence between the input and its normalized form (e.g.
-        // a lowercase country code). For the common case where every item is already normalized, this avoids
+        // Only materialises a copy on the first divergence between the input and its normalised form (e.g.
+        // a lowercase country code). For the common case where every item is already normalised, this avoids
         // doubling peak managed heap with a second List plus up to 50,000 fresh EnrichmentRequest instances.
         List<EnrichmentRequest>? effectiveList = null;
         for (int i = 0; i < requestList.Count; i++)
@@ -592,7 +592,7 @@ public sealed class XyoClient : IXyoClient
     }
 
     // HttpRequestMessage instances built by the unary methods above are deliberately NOT wrapped in `using`.
-    // HttpClient does not dispose the request or its content (verified), so an analyzer such as CA2000 will
+    // HttpClient does not dispose the request or its content (verified), so an analyser such as CA2000 will
     // flag this, but disposing it here buys nothing and costs something real:
     //
     //   * There is no unmanaged resource to release. JsonContent and StringContent hold managed memory with

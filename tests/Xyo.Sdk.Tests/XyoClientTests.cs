@@ -1086,7 +1086,7 @@ public class XyoClientTests
     [Fact]
     public async Task EnrichTransactionsAsync_AlreadyNormalizedBatch_SendsItemsUnchanged()
     {
-        // The batch path elides its defensive copy when an item's country code already equals its normalized
+        // The batch path elides its defensive copy when an item's country code already equals its normalised
         // form. This asserts the observable contract of that optimization -- an already-uppercase batch is
         // transmitted verbatim -- rather than asserting how the BCL happens to implement ToUpperInvariant.
         string captured = string.Empty;
