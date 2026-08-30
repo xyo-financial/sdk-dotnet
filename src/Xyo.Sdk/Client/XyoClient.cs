@@ -251,7 +251,7 @@ public sealed class XyoClient : IXyoClient
                 throw new ArgumentNullException(nameof(requests), $"Transaction item at index {i} cannot be null.");
             }
             ValidateTransactionInput(item.Content, item.CountryCode, out string normalized);
-            if (!ReferenceEquals(normalized, item.CountryCode))
+            if (!string.Equals(normalized, item.CountryCode, StringComparison.Ordinal))
             {
                 effectiveList ??= new List<EnrichmentRequest>(requestList);
                 effectiveList[i] = new EnrichmentRequest(item.Content, normalized);
@@ -450,69 +450,18 @@ public sealed class XyoClient : IXyoClient
 
             await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
 
-            using var responseStream = await response!.Content.ReadAsStreamAsync(effectiveToken).ConfigureAwait(false);
+            using var responseStream = await response!.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var idleStream = new IdleTimeoutStream(responseStream, _config.DownloadTimeout);
 
-            // From here on, DownloadTimeout is enforced per-record (reset before each one) instead of as a
-            // single deadline spanning the whole enumeration. The timeoutCts above ticks continuously in
-            // real time regardless of what the caller does between MoveNextAsync calls -- with a single
-            // deadline for the entire await-foreach, time the CALLER spends processing each yielded record
-            // (e.g. a database write) counted against the SDK's own budget. At the shipped defaults
-            // (MaxTarEntries=50,000, DownloadTimeout=10 min) that budget is exhausted at ~12ms of consumer
-            // work per record, on a network that was never slow. A fresh per-record window means only an
-            // actual stall in the network read or decompression trips it; the caller's own processing time
-            // is never counted, no matter how long it takes.
-            var recordEnumerator = TarStreamReader.StreamArchiveAsync(
-                responseStream,
+            await foreach (var item in TarStreamReader.StreamArchiveAsync(
+                idleStream,
                 _config.MaxArchiveBytes,
                 _config.MaxDecompressedBytes,
                 _config.MaxEntryBytes,
                 _config.MaxTarEntries,
-                cancellationToken).GetAsyncEnumerator(cancellationToken);
-
-            try
+                cancellationToken).ConfigureAwait(false))
             {
-                while (true)
-                {
-                    bool hasNext;
-                    try
-                    {
-                        hasNext = await recordEnumerator.MoveNextAsync().AsTask()
-                            .WaitAsync(_config.DownloadTimeout, cancellationToken).ConfigureAwait(false);
-                    }
-                    catch (TimeoutException ex)
-                    {
-                        // Task.WaitAsync(TimeSpan, CancellationToken) throws TimeoutException when the
-                        // per-record budget elapses, and OperationCanceledException (left unhandled, so it
-                        // propagates as-is) when cancellationToken itself fires -- the two are already
-                        // disambiguated for us, unlike the SendAsync phase above which has to distinguish
-                        // them via the `when` filter on a single combined token.
-                        throw new XyoNetworkException(
-                            $"Archive download stalled for more than {_config.DownloadTimeout.TotalSeconds} seconds without producing a record.", ex);
-                    }
-
-                    if (!hasNext)
-                    {
-                        break;
-                    }
-
-                    yield return recordEnumerator.Current;
-                }
-            }
-            finally
-            {
-                try
-                {
-                    await recordEnumerator.DisposeAsync().ConfigureAwait(false);
-                }
-                catch
-                {
-                    // Best-effort cleanup. Disposing the inner tar/gzip reader chain mid-entry (e.g. after
-                    // the timeout above, or the caller breaking out of the enumeration early) can itself
-                    // throw while it tries to skip the unread remainder of a non-seekable stream -- an
-                    // exception here would otherwise REPLACE whatever exception is already propagating out
-                    // of the try block above per C#'s finally-block semantics, masking the real failure
-                    // behind an unrelated one from cleanup.
-                }
+                yield return item;
             }
         }
         finally
@@ -572,6 +521,8 @@ public sealed class XyoClient : IXyoClient
         }
     }
 
+    private const int MaxUnaryResponseChars = 1_048_576; // 1 MiB, ~8x the largest plausible batch receipt
+
     /// <summary>
     /// Deserializes a response body, translating malformed-payload failures (e.g. a required field the
     /// server sent as null) into a typed <see cref="XyoServerException"/> instead of letting a raw
@@ -579,16 +530,29 @@ public sealed class XyoClient : IXyoClient
     /// </summary>
     private static async Task<T> DeserializeResponseAsync<T>(Stream stream, HttpStatusCode statusCode, string emptyPayloadMessage, CancellationToken cancellationToken)
     {
-        // Buffered rather than parsed directly off the stream so a schema-mismatch failure can still
-        // attach the payload that caused it: JsonSerializer.DeserializeAsync(stream) consumes the stream
-        // as it parses, so if a straight streaming parse failed there would be nothing left to read back
-        // -- the one exception whose entire purpose is diagnosing a malformed payload would carry no
-        // payload. Unary response bodies here are modest (a single record, a batch job receipt, a status
-        // lookup), unlike the archive path, which stays genuinely streaming for exactly that reason.
+        // Buffered with an upper bound rather than parsed directly off the stream so a schema-mismatch failure
+        // can still attach the payload that caused it without risking an unbounded memory allocation (OOM)
+        // on malformed or unexpected oversized responses (e.g. gateway HTML error pages).
+        char[] buffer = ArrayPool<char>.Shared.Rent(MaxUnaryResponseChars);
         string raw;
-        using (var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: false))
+        try
         {
-            raw = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: false);
+            int totalRead = await reader.ReadBlockAsync(buffer.AsMemory(0, MaxUnaryResponseChars), cancellationToken).ConfigureAwait(false);
+
+            // Verify there is no excess content past the maximum allowed unary response size
+            var oneChar = new char[1];
+            if (totalRead == MaxUnaryResponseChars && await reader.ReadAsync(oneChar.AsMemory(0, 1), cancellationToken).ConfigureAwait(false) > 0)
+            {
+                throw new XyoServerException(statusCode,
+                    $"API response exceeded the maximum supported size of {MaxUnaryResponseChars} characters.");
+            }
+
+            raw = new string(buffer, 0, totalRead);
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(buffer, clearArray: true);
         }
 
         T? result;
@@ -893,5 +857,91 @@ public sealed class XyoClient : IXyoClient
             }
         }
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Stream wrapper that enforces a per-read idle stall timeout without counting time spent by the caller
+    /// processing yielded records between reads. When an individual read stalls longer than <c>idleTimeout</c>,
+    /// it cancels the in-flight read and throws a typed <see cref="XyoNetworkException"/>.
+    /// </summary>
+    private sealed class IdleTimeoutStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly TimeSpan _idleTimeout;
+
+        public IdleTimeoutStream(Stream inner, TimeSpan idleTimeout)
+        {
+            _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+            _idleTimeout = idleTimeout;
+        }
+
+        public override bool CanRead => _inner.CanRead;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() => _inner.Flush();
+        public override Task FlushAsync(CancellationToken cancellationToken) => _inner.FlushAsync(cancellationToken);
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            using var cts = new CancellationTokenSource(_idleTimeout);
+            try
+            {
+                return _inner.Read(buffer);
+            }
+            catch (OperationCanceledException ex)
+            {
+                throw new XyoNetworkException(
+                    $"Archive download stalled for more than {_idleTimeout.TotalSeconds} seconds.", ex);
+            }
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(_idleTimeout);
+            try
+            {
+                return await _inner.ReadAsync(buffer, cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new XyoNetworkException(
+                    $"Archive download stalled for more than {_idleTimeout.TotalSeconds} seconds.", ex);
+            }
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            return ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _inner.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            await _inner.DisposeAsync().ConfigureAwait(false);
+            await base.DisposeAsync().ConfigureAwait(false);
+        }
     }
 }

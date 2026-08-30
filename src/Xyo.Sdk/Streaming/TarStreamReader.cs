@@ -59,13 +59,13 @@ public static class TarStreamReader
         }
 
         // Bounded stream wrapper to track wire (compressed) bytes read against maxArchiveBytes
-        var wireStream = new BoundedReadStream(compressedStream, maxArchiveBytes);
+        var wireStream = new BoundedReadStream(compressedStream, maxArchiveBytes, boundLabel: "download wire size");
 
         using var gzipStream = new GZipStream(wireStream, CompressionMode.Decompress, leaveOpen: true);
 
         // Independent bound on total INFLATED bytes -- this is the actual decompression-bomb defense.
         // maxArchiveBytes above only limits bytes taken off the wire before inflation.
-        var inflatedStream = new BoundedReadStream(gzipStream, maxDecompressedBytes);
+        var inflatedStream = new BoundedReadStream(gzipStream, maxDecompressedBytes, boundLabel: "decompressed content size");
 
         using var tarReader = new TarReader(inflatedStream, leaveOpen: true);
 
@@ -79,6 +79,10 @@ public static class TarStreamReader
                 entry = await tarReader.GetNextEntryAsync(copyData: false, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (XyoException)
             {
                 throw;
             }
@@ -136,7 +140,7 @@ public static class TarStreamReader
             {
                 throw;
             }
-            catch (XyoClientException)
+            catch (XyoException)
             {
                 throw;
             }
@@ -184,13 +188,15 @@ public static class TarStreamReader
         private readonly Stream _innerStream;
         private readonly long _maxBytes;
         private readonly string? _entryName;
+        private readonly string? _boundLabel;
         private long _totalBytesRead;
 
-        public BoundedReadStream(Stream innerStream, long maxBytes, string? entryName = null)
+        public BoundedReadStream(Stream innerStream, long maxBytes, string? entryName = null, string? boundLabel = null)
         {
             _innerStream = innerStream ?? throw new ArgumentNullException(nameof(innerStream));
             _maxBytes = maxBytes;
             _entryName = entryName;
+            _boundLabel = boundLabel;
         }
 
         public override bool CanRead => _innerStream.CanRead;
@@ -254,6 +260,12 @@ public static class TarStreamReader
             {
                 throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
                     $"Tar entry '{_entryName}' exceeds maximum size limit ({_maxBytes} bytes). Decompression bomb rejected.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(_boundLabel))
+            {
+                throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
+                    $"Archive {_boundLabel} exceeded maximum allowed byte size ({_maxBytes} bytes). Decompression bomb ingestion rejected.");
             }
 
             throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,

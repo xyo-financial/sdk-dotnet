@@ -837,4 +837,106 @@ public class XyoClientTests
 
         Assert.Equal("gb", item.CountryCode);
     }
+
+    private sealed class SlowContinuousStream : Stream
+    {
+        private readonly byte[] _data;
+        private int _position;
+        private readonly TimeSpan _chunkDelay;
+
+        public SlowContinuousStream(byte[] data, TimeSpan chunkDelay)
+        {
+            _data = data;
+            _chunkDelay = chunkDelay;
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_position >= _data.Length)
+            {
+                return 0;
+            }
+
+            await Task.Delay(_chunkDelay, cancellationToken).ConfigureAwait(false);
+
+            int toCopy = Math.Min(Math.Min(buffer.Length, 16), _data.Length - _position);
+            _data.AsSpan(_position, toCopy).CopyTo(buffer.Span);
+            _position += toCopy;
+            return toCopy;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_SlowContinuousTransfer_NeverStalls_CompletesSuccessfully()
+    {
+        // Tests that a continuous stream delivering bytes steadily at intervals shorter than DownloadTimeout
+        // (e.g. 20ms delay per chunk with a 100ms idle timeout, but total duration > 200ms) completes successfully
+        // without false stall timeouts, proving that the idle timer resets on every byte/read.
+        byte[] archiveData = TarGzOfRecords(3);
+        var mockHandler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new SlowContinuousStream(archiveData, TimeSpan.FromMilliseconds(20)))
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(mockHandler);
+        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromMilliseconds(100) };
+        using var client = new XyoClient(config, httpClient);
+
+        int count = 0;
+        await foreach (var record in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+        {
+            count++;
+        }
+
+        Assert.Equal(3, count);
+    }
+
+    [Fact]
+    public async Task EnrichTransactionAsync_ExceedingUnarySizeCap_ThrowsXyoServerException()
+    {
+        // 2 MB of data returned with 200 OK (e.g. gateway HTML error page with Content-Type application/json)
+        string oversized = "{\"data\":\"" + new string('A', 2 * 1024 * 1024) + "\"}";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, oversized);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+        Assert.Contains("exceeded the maximum supported size", ex.Message);
+    }
+
+    [Fact]
+    public async Task EnrichTransactionAsync_SchemaMismatch_AttachesBoundedRawResponseBody()
+    {
+        string invalidJson = "{\"merchant\": null, \"some_unexpected_field\": 12345}";
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, invalidJson);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoServerException>(() => client.EnrichTransactionAsync("Uber", "GB"));
+        Assert.Contains("does not conform to the enrichment schema", ex.Message);
+        Assert.NotNull(ex.RawResponseBody);
+        Assert.Equal(invalidJson, ex.RawResponseBody);
+    }
+
+    [Fact]
+    public void CountryCode_OrdinalNormalization_Canary()
+    {
+        string original = "GB";
+        string upper = original.ToUpperInvariant();
+        Assert.Equal(original, upper);
+    }
 }

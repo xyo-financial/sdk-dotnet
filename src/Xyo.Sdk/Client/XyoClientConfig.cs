@@ -86,10 +86,11 @@ public sealed record XyoClientConfig
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Gets the timeout duration for the entire bulk archive download and processing operation
+    /// Gets the timeout duration for archive download and stream processing
     /// (<see cref="Xyo.Sdk.Client.IXyoClient.StreamEnrichmentCollectionAsync"/> /
-    /// <see cref="Xyo.Sdk.Client.IXyoClient.DownloadEnrichmentCollectionAsync"/>), covering all redirect
-    /// hops plus the full download and decompression. Kept independent of <see cref="Timeout"/> because a
+    /// <see cref="Xyo.Sdk.Client.IXyoClient.DownloadEnrichmentCollectionAsync"/>).
+    /// Enforces a deadline on initial HTTP connection/redirects, and serves as an idle stall timeout
+    /// between network reads during stream processing. Kept independent of <see cref="Timeout"/> because a
     /// multi-hundred-MB archive legitimately needs far longer than a single unary call.
     /// </summary>
     public TimeSpan DownloadTimeout { get; init; } = TimeSpan.FromMinutes(10);
@@ -376,7 +377,7 @@ public sealed record XyoClientConfig
         {
             if (CrlfRegex.IsMatch(key) || CrlfRegex.IsMatch(value))
             {
-                throw new ArgumentException($"Default header '{key}' contains forbidden CRLF injection characters (CWE-113).", nameof(headers));
+                throw new ArgumentException($"Default header '{key}' contains forbidden CRLF injection characters (CWE-113).", nameof(DefaultHeaders));
             }
             copy[key] = value;
         }

@@ -66,7 +66,7 @@ public static class ServiceCollectionExtensions
         })
         .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
-        services.TryAddSingleton<IXyoClient>(sp =>
+        services.AddSingleton<IXyoClient>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<XyoClientOptions>>().Value;
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
@@ -113,7 +113,7 @@ public static class ServiceCollectionExtensions
         })
         .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
 
-        services.TryAddSingleton<IXyoClient>(sp =>
+        services.AddSingleton<IXyoClient>(sp =>
         {
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             var httpClient = httpClientFactory.CreateClient(HttpClientName);

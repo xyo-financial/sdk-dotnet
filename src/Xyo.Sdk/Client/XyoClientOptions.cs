@@ -46,8 +46,9 @@ public sealed class XyoClientOptions
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Gets or sets the timeout duration for the entire bulk archive download and processing operation
-    /// (default 10 minutes), independent of <see cref="Timeout"/>.
+    /// Gets or sets the timeout duration for archive download and stream processing (default 10 minutes),
+    /// independent of <see cref="Timeout"/>. Enforces a deadline on initial HTTP connection/redirects and
+    /// acts as a per-read idle stall timeout during stream decompression.
     /// </summary>
     public TimeSpan DownloadTimeout { get; set; } = TimeSpan.FromMinutes(10);
 

@@ -115,7 +115,20 @@ public class TarStreamReaderTests
         var ex = await Assert.ThrowsAsync<XyoClientException>(() =>
             TarStreamReader.ReadArchiveAsync(ms, maxDecompressedBytes: 150_000, maxEntryBytes: 200_000));
 
-        Assert.Contains("exceeded maximum allowed byte size", ex.Message);
+        Assert.Contains("decompressed content size exceeded maximum allowed byte size", ex.Message);
+    }
+
+    [Fact]
+    public async Task ReadArchiveAsync_WireSizeExceedingMaxArchiveBytes_ThrowsXyoClientException()
+    {
+        string record = @"{ ""merchant"": ""M"", ""description"": ""Desc"", ""categories"": [""General""], ""logo"": ""https://cdn.xyo.financial/logo.png"", ""location"": ""London, UK"", ""address"": ""1 High St"" }";
+        byte[] archiveBytes = CreateValidTarGz(("001.json", record));
+
+        using var ms = new MemoryStream(archiveBytes);
+        var ex = await Assert.ThrowsAsync<XyoClientException>(() =>
+            TarStreamReader.ReadArchiveAsync(ms, maxArchiveBytes: 50));
+
+        Assert.Contains("download wire size exceeded maximum allowed byte size", ex.Message);
     }
 
     [Fact]
