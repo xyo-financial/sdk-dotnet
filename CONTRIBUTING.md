@@ -69,6 +69,24 @@ make generate
 
 ---
 
+### Generated Code Policy
+
+> [!IMPORTANT]
+> `src/Xyo.Generated/` is produced by OpenAPI Generator and is committed **exactly as the generator emits it**.
+
+- **Never edit it by hand.** Any manual change is silently destroyed by the next specification dispatch. Real fixes have already been lost this way, including a package GUID that the generator re-minted at random on every run.
+- **Never reformat it.** It is excluded from formatting and linting via `--exclude src/Xyo.Generated/` on the `dotnet format` check in `.github/workflows/makefile.yml`. Generated output that has been reformatted no longer matches what the generator produces, so every regeneration then fights CI and the diff fills with style churn instead of specification changes.
+- **It is out of scope for code review, security review, audit and any other sanitisation pass.** Do not raise findings against generated output. Review the specification in [`xyo-financial/specs`](https://github.com/xyo-financial/specs) or the hand-written wrapper layer instead, which is what consumers actually call.
+- **It carries no hand-written tests.** Generated tests are disabled at generation time. Test the wrapper layer.
+
+If generated output is wrong, fix it at source, never in the output:
+
+1. Change the specification upstream in `xyo-financial/specs`, if the contract itself is wrong.
+2. Change the generator invocation in `.github/workflows/generate.yml`, if it is a generation setting.
+3. Add the file to the preserved-file list in `generate.yml`, if the generator's version of it is genuinely not the source of truth. `Xyo.Generated.csproj` is preserved this way, because the project file is hand-maintained.
+
+---
+
 ## 🛠 4. Prerequisites & Development Environment
 
 - **.NET SDK:** .NET 8.0 SDK (`dotnet --version` >= 8.0.100)
