@@ -32,4 +32,8 @@ jobs:
         run: dotnet test Xyo.Sdk.sln -c Release --no-build --verbosity normal --collect:"XPlat Code Coverage"
 
       - name: Verify Code Formatting
-        run: dotnet format Xyo.Sdk.sln --verify-no-changes
+        # src/Xyo.Generated is machine-generated and is committed exactly as the generator emits it, so
+        # it is excluded rather than reformatted. Holding generated output to hand-written formatting
+        # rules only means regeneration and CI disagree forever. sdk-node excludes src/generated from
+        # eslint and prettier, and sdk-rust excludes openapi from rustfmt, for the same reason.
+        run: dotnet format Xyo.Sdk.sln --verify-no-changes --exclude src/Xyo.Generated/

@@ -48,7 +48,7 @@ jobs:
             -i specs/openapi.yml \
             -g csharp \
             -o /tmp/csharp-gen \
-            --additional-properties=packageName=Xyo.Generated,targetFramework=net8.0,nullableReferenceTypes=true,netCoreProjectFile=true,library=generichost \
+            --additional-properties=packageName=Xyo.Generated,targetFramework=net8.0,nullableReferenceTypes=true,netCoreProjectFile=true,library=generichost,packageGuid='{D10EC6FB-72E2-4B9B-BF19-D0941180FA3D}' \
             --global-property apiTests=false,modelTests=false,apiDocs=false,modelDocs=false
 
           # Replace the generated tree entirely rather than merging over it, so a model removed from the
@@ -66,14 +66,10 @@ jobs:
         run: |
           dotnet restore Xyo.Sdk.sln
 
-          # Format the freshly generated tree before the diff is captured. The generator's raw output is
-          # not formatted to this repository's rules, but CI runs `dotnet format Xyo.Sdk.sln
-          # --verify-no-changes` across the whole solution, Xyo.Generated included. Leaving the output raw
-          # therefore produced regeneration PRs that always failed formatting, on whitespace and brace
-          # placement in files nobody had touched. Formatting here reproduces what is already committed on
-          # main, so a regeneration diff shows real changes instead of style churn.
-          dotnet format src/Xyo.Generated/Xyo.Generated.csproj
-
+          # Generated output is committed exactly as the generator emits it and is never reformatted, so
+          # the committed tree always matches what the generator actually produced. CI excludes
+          # src/Xyo.Generated from its formatting check for the same reason.
+          #
           # Hand-written code must already be formatted; regeneration is not licence to rewrite it.
           dotnet format src/Xyo.Sdk/Xyo.Sdk.csproj --verify-no-changes
 
