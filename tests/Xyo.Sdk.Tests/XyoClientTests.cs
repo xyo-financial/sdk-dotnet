@@ -1136,7 +1136,7 @@ public class XyoClientTests
         await client.EnrichTransactionsAsync(new[] { lowercase });
 
         Assert.Contains(@"""countryCode"":""GB""", captured);
-        // The caller's own object is never mutated in place by normalization.
+        // The caller's own object is never mutated in place by normalisation.
         Assert.Equal("gb", lowercase.CountryCode);
     }
 }
