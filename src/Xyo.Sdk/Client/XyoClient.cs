@@ -590,6 +590,20 @@ public sealed class XyoClient : IXyoClient
         return result ?? throw new XyoServerException(statusCode, emptyPayloadMessage, rawResponseBody: raw);
     }
 
+    // HttpRequestMessage instances built by the unary methods above are deliberately NOT wrapped in `using`.
+    // HttpClient does not dispose the request or its content (verified), so an analyzer such as CA2000 will
+    // flag this, but disposing it here buys nothing and costs something real:
+    //
+    //   * There is no unmanaged resource to release. JsonContent and StringContent hold managed memory with
+    //     no handles and no finalizer, so the GC reclaims them either way.
+    //   * Disposing the request disposes its Content, which breaks deferred inspection by a caller-supplied
+    //     DelegatingHandler. AddXyoClient returns an IHttpClientBuilder precisely so consumers can install
+    //     logging, audit, or retry handlers; one that captures a request to inspect after the pipeline
+    //     completes would get ObjectDisposedException on its Content.
+    //   * It bakes in single-use semantics. A disposed HttpRequestMessage cannot be resent, and .NET 5
+    //     relaxed request reuse specifically to allow SDK-side retry, which is not implemented yet.
+    //
+    // Revisit only if a future request body holds an unmanaged resource (e.g. a StreamContent over a file).
     private static void ValidateHeaderValue(string val, string paramName)
     {
         if (CrlfRegex.IsMatch(val))
