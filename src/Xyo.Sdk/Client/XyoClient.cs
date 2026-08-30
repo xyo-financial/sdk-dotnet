@@ -886,7 +886,14 @@ public sealed class XyoClient : IXyoClient
     /// processing yielded records between reads. When an individual read stalls longer than <c>idleTimeout</c>,
     /// it cancels the in-flight read and throws a typed <see cref="XyoNetworkException"/>.
     /// </summary>
-    private sealed class IdleTimeoutStream : Stream
+    /// <remarks>
+    /// Asynchronous reads only. <see cref="Stream.Read(byte[], int, int)"/> and
+    /// <see cref="Stream.Read(Span{byte})"/> accept no <see cref="CancellationToken"/>, so the timeout cannot
+    /// be enforced on a synchronous read without abandoning a thread. They throw
+    /// <see cref="NotSupportedException"/> rather than reading with no timeout at all behind an API that
+    /// looks like it has one.
+    /// </remarks>
+    internal sealed class IdleTimeoutStream : Stream
     {
         private readonly Stream _inner;
         private readonly TimeSpan _idleTimeout;
@@ -910,22 +917,13 @@ public sealed class XyoClient : IXyoClient
         public override void Flush() => _inner.Flush();
         public override Task FlushAsync(CancellationToken cancellationToken) => _inner.FlushAsync(cancellationToken);
 
-        public override int Read(byte[] buffer, int offset, int count) =>
-            Read(buffer.AsSpan(offset, count));
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException(
+            "IdleTimeoutStream is asynchronous-only: a synchronous read cannot be bounded by the idle " +
+            "timeout. Use ReadAsync.");
 
-        public override int Read(Span<byte> buffer)
-        {
-            using var cts = new CancellationTokenSource(_idleTimeout);
-            try
-            {
-                return _inner.Read(buffer);
-            }
-            catch (OperationCanceledException ex)
-            {
-                throw new XyoNetworkException(
-                    $"Archive download stalled for more than {_idleTimeout.TotalSeconds} seconds.", ex);
-            }
-        }
+        public override int Read(Span<byte> buffer) => throw new NotSupportedException(
+            "IdleTimeoutStream is asynchronous-only: a synchronous read cannot be bounded by the idle " +
+            "timeout. Use ReadAsync.");
 
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {

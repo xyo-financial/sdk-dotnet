@@ -906,6 +906,19 @@ public class XyoClientTests
     }
 
     [Fact]
+    public void IdleTimeoutStream_SynchronousRead_ThrowsNotSupportedRatherThanReadingUntimed()
+    {
+        // Stream.Read takes no CancellationToken, so the idle timeout cannot be enforced on a synchronous
+        // read. Failing loudly is the honest option; the alternative is an unbounded read behind an API
+        // whose name promises a timeout.
+        using var inner = new MemoryStream(new byte[] { 1, 2, 3, 4 });
+        using var stream = new XyoClient.IdleTimeoutStream(inner, TimeSpan.FromSeconds(1));
+
+        Assert.Throws<NotSupportedException>(() => stream.Read(new byte[4], 0, 4));
+        Assert.Throws<NotSupportedException>(() => stream.Read(new Span<byte>(new byte[4])));
+    }
+
+    [Fact]
     public async Task EnrichTransactionAsync_ExceedingUnarySizeCap_AttachesBoundedDiagnosticPrefix()
     {
         // Rejecting an oversized body without keeping any of it leaves an operator unable to tell a gateway
