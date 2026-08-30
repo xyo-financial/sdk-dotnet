@@ -108,7 +108,7 @@ namespace YourProject
 
 ## Api Information
 - appName: XYO RESTful Transaction Enrichment API
-- appVersion: 2.0.3
+- appVersion: 2.0.9
 - appDescription: RESTful API for enriching financial transactions.
 
 ## Build
