@@ -2,7 +2,8 @@ name: Regenerate C# OpenAPI Client
 
 on:
   repository_dispatch:
-    types: [spec_tagged, spec_updated]
+    # specs only ever emits spec_tagged; see xyo-financial/specs#12
+    types: [spec_tagged]
   workflow_dispatch:
     inputs:
       spec_tag:
