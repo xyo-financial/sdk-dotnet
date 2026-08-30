@@ -933,10 +933,59 @@ public class XyoClientTests
     }
 
     [Fact]
-    public void CountryCode_OrdinalNormalization_Canary()
+    public async Task EnrichTransactionsAsync_AlreadyNormalizedBatch_SendsItemsUnchanged()
     {
-        string original = "GB";
-        string upper = original.ToUpperInvariant();
-        Assert.Equal(original, upper);
+        // The batch path elides its defensive copy when an item's country code already equals its normalized
+        // form. This asserts the observable contract of that optimization -- an already-uppercase batch is
+        // transmitted verbatim -- rather than asserting how the BCL happens to implement ToUpperInvariant.
+        string captured = string.Empty;
+        var handler = new MockHttpMessageHandler(async (req, _) =>
+        {
+            captured = await req.Content!.ReadAsStringAsync();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    @"{ ""id"": ""job-1"", ""link"": ""https://api.xyo.financial/batches/1.tar.gz"" }",
+                    System.Text.Encoding.UTF8, "application/json")
+            };
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var requests = new[]
+        {
+            new EnrichmentRequest("TESCO STORES 3428", "GB"),
+            new EnrichmentRequest("UBER TRIP", "US")
+        };
+
+        await client.EnrichTransactionsAsync(requests);
+
+        Assert.Contains(@"""countryCode"":""GB""", captured);
+        Assert.Contains(@"""countryCode"":""US""", captured);
+    }
+
+    [Fact]
+    public async Task EnrichTransactionsAsync_MixedCaseBatch_NormalizesWithoutMutatingCallerObjects()
+    {
+        string captured = string.Empty;
+        var handler = new MockHttpMessageHandler(async (req, _) =>
+        {
+            captured = await req.Content!.ReadAsStringAsync();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    @"{ ""id"": ""job-1"", ""link"": ""https://api.xyo.financial/batches/1.tar.gz"" }",
+                    System.Text.Encoding.UTF8, "application/json")
+            };
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        var lowercase = new EnrichmentRequest("TESCO STORES 3428", "gb");
+        await client.EnrichTransactionsAsync(new[] { lowercase });
+
+        Assert.Contains(@"""countryCode"":""GB""", captured);
+        // The caller's own object is never mutated in place by normalization.
+        Assert.Equal("gb", lowercase.CountryCode);
     }
 }
