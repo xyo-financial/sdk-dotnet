@@ -116,4 +116,63 @@ public class ProblemDetailsTests
         string trimmed = ex.Message.TrimEnd('\u2026');
         Assert.False(char.IsSurrogate(trimmed[^1]), "clamped message must not end in a lone surrogate");
     }
+
+    [Fact]
+    public void FromJson_TitleOnly_UsesTitleAsTheMessage()
+    {
+        // RFC 7807 makes every member optional. With no "detail", the message falls back to "title".
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, @"{ ""title"": ""Validation failed"" }");
+
+        Assert.Equal("Validation failed", ex.Message);
+        Assert.Equal("Validation failed", ex.Title);
+        Assert.Null(ex.Detail);
+    }
+
+    [Fact]
+    public void FromJson_NeitherDetailNorTitle_FallsBackToStatusLine()
+    {
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, @"{ ""type"": ""about:blank"" }");
+
+        Assert.Contains("[HTTP 400]", ex.Message);
+        Assert.Equal("about:blank", ex.Type);
+        Assert.Null(ex.Title);
+        Assert.Null(ex.Detail);
+    }
+
+    [Fact]
+    public void FromJson_ErrorsAsScalarStrings_AreWrappedIntoSingleElementArrays()
+    {
+        // ASP.NET Core emits arrays, but other stacks emit a bare string per field. Both must land in the
+        // same shape so a caller reading Errors does not have to branch on the server's dialect.
+        string payload = @"{ ""title"": ""Invalid"", ""errors"": { ""countryCode"": ""must be ISO 3166-1 alpha-2"" } }";
+
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, payload);
+
+        Assert.NotNull(ex.Errors);
+        Assert.Equal(new[] { "must be ISO 3166-1 alpha-2" }, ex.Errors!["countryCode"]);
+    }
+
+    [Fact]
+    public void FromJson_ErrorsWithUnsupportedValueKind_IsIgnoredRatherThanThrowing()
+    {
+        // A numeric or object value under "errors" is neither an array nor a string. It must be skipped so
+        // one unexpected field cannot cost the caller the rest of a parseable problem document.
+        string payload = @"{ ""title"": ""Invalid"", ""errors"": { ""retries"": 3, ""countryCode"": [""required""] } }";
+
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, payload);
+
+        Assert.NotNull(ex.Errors);
+        Assert.False(ex.Errors!.ContainsKey("retries"));
+        Assert.Equal(new[] { "required" }, ex.Errors["countryCode"]);
+    }
+
+    [Fact]
+    public void FromJson_ErrorsArrayWithNonStringElements_KeepsOnlyTheStrings()
+    {
+        string payload = @"{ ""title"": ""Invalid"", ""errors"": { ""content"": [""too long"", 42, null] } }";
+
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, payload);
+
+        Assert.Equal(new[] { "too long" }, ex.Errors!["content"]);
+    }
 }
