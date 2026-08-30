@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 using Xyo.Sdk.Client;
+using Xyo.Sdk.Extensions;
 
 namespace Xyo.Sdk.Tests;
 
@@ -56,6 +58,80 @@ public class XyoClientConfigTests
             var ex = Assert.Throws<ArgumentException>(() => new XyoClient(config));
             Assert.Contains("XYO_API_BASE_URL", ex.Message);
             Assert.Contains("http://internal-proxy:8080", ex.Message);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(EnvVarName, original);
+        }
+    }
+
+    [Fact]
+    public void ToConfig_InvalidEnvironmentDefault_ThrowsWithSameHintAsDirectConstruction()
+    {
+        // ToConfig validates BaseUrl through the init accessor, which throws before XyoClient's constructor
+        // is ever reached. Without the hint being attached here too, the DI path -- the primary one for
+        // hosted applications -- reported only "must use HTTPS" against a URL the caller never wrote down.
+        string? original = Environment.GetEnvironmentVariable(EnvVarName);
+        try
+        {
+            Environment.SetEnvironmentVariable(EnvVarName, "http://internal-proxy:8080");
+
+            var ex = Assert.Throws<ArgumentException>(() => new XyoClientOptions().ToConfig());
+
+            Assert.Contains("XYO_API_BASE_URL", ex.Message);
+            Assert.Contains("http://internal-proxy:8080", ex.Message);
+            Assert.Contains("XyoClientOptions.BaseUrl", ex.Message);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(EnvVarName, original);
+        }
+    }
+
+    [Fact]
+    public void AddXyoClient_InvalidEnvironmentDefault_SurfacesTheEnvironmentVariableHint()
+    {
+        string? original = Environment.GetEnvironmentVariable(EnvVarName);
+        try
+        {
+            Environment.SetEnvironmentVariable(EnvVarName, "http://internal-proxy:8080");
+
+            var services = new ServiceCollection();
+            services.AddXyoClient(options => options.ApiKey = "key");
+            using var provider = services.BuildServiceProvider();
+
+            var ex = Assert.ThrowsAny<Exception>(() => provider.GetRequiredService<IXyoClient>());
+
+            // Asserted across the whole chain rather than on a single link: the hint is attached by
+            // ToConfig, the un-hinted NormalizeBaseUrl failure is retained as its inner exception, and the
+            // DI container is free to wrap either. What matters is that an operator reading the exception
+            // sees the environment variable named somewhere.
+            var messages = new List<string>();
+            for (Exception? current = ex; current != null; current = current.InnerException)
+            {
+                messages.Add(current.Message);
+            }
+
+            Assert.Contains(messages, m => m.Contains("XYO_API_BASE_URL", StringComparison.Ordinal));
+            Assert.Contains(messages, m => m.Contains("http://internal-proxy:8080", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(EnvVarName, original);
+        }
+    }
+
+    [Fact]
+    public void ToConfig_ExplicitBaseUrl_NotPreemptedByInvalidEnvironmentVariable()
+    {
+        string? original = Environment.GetEnvironmentVariable(EnvVarName);
+        try
+        {
+            Environment.SetEnvironmentVariable(EnvVarName, "http://internal-proxy:8080");
+
+            var config = new XyoClientOptions { BaseUrl = "https://sandbox.xyo.financial" }.ToConfig();
+
+            Assert.Equal("https://sandbox.xyo.financial", config.BaseUrl);
         }
         finally
         {

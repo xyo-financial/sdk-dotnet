@@ -94,17 +94,7 @@ public sealed class XyoClient : IXyoClient
         // override -- see the comment on XyoClientConfig's `_baseUrl` field initializer. That means the
         // effective value must be validated here instead, the first point where we know for certain
         // whether an override was supplied.
-        try
-        {
-            XyoClientConfig.NormalizeBaseUrl(_config.BaseUrl);
-        }
-        catch (ArgumentException ex)
-        {
-            throw new ArgumentException(
-                $"XyoClientConfig.BaseUrl '{_config.BaseUrl}' is invalid: {ex.Message} " +
-                "If BaseUrl was not set explicitly, check the XYO_API_BASE_URL environment variable.",
-                nameof(config), ex);
-        }
+        XyoClientConfig.ValidateEffectiveBaseUrl(_config.BaseUrl, "XyoClientConfig.BaseUrl", nameof(config));
 
         _securityPolicy = new DownloadSecurityPolicy(_config.BaseUrl, _config.TrustedDownloadHosts);
 

@@ -96,6 +96,13 @@ public sealed class XyoClientOptions
     /// </summary>
     public XyoClientConfig ToConfig()
     {
+        // Validated here rather than left to the BaseUrl init accessor below, so a bad value carries the
+        // same XYO_API_BASE_URL hint the XyoClient constructor attaches on the non-DI path. Without this,
+        // ToConfig throws from the init accessor before XyoClient's constructor ever runs, and the DI path
+        // (the primary one for hosted applications) reports only "must use HTTPS" against a URL that
+        // appears nowhere in the caller's own code or configuration files.
+        XyoClientConfig.ValidateEffectiveBaseUrl(BaseUrl, "XyoClientOptions.BaseUrl", nameof(BaseUrl));
+
         return new XyoClientConfig(ApiKey)
         {
             ApiKeySupplier = ApiKeySupplier,

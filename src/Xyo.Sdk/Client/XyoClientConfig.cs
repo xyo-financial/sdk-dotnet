@@ -357,6 +357,33 @@ public sealed record XyoClientConfig
         return trimmed;
     }
 
+    /// <summary>
+    /// Validates an effective base URL and rethrows any failure with the environment-variable hint attached.
+    /// </summary>
+    /// <param name="baseUrl">The effective base URL to validate.</param>
+    /// <param name="propertyPath">Owning property named in the message, e.g. <c>XyoClientOptions.BaseUrl</c>.</param>
+    /// <param name="paramName">Parameter name to attach to the thrown <see cref="ArgumentException"/>.</param>
+    /// <remarks>
+    /// Shared by every construction path (<see cref="XyoClient"/>'s constructor and
+    /// <see cref="XyoClientOptions.ToConfig"/>) rather than duplicated, so the diagnostic cannot drift
+    /// between them. The hint matters because a value inherited from XYO_API_BASE_URL appears nowhere in the
+    /// caller's own code, and the error would otherwise name a URL they cannot find.
+    /// </remarks>
+    internal static void ValidateEffectiveBaseUrl(string baseUrl, string propertyPath, string paramName)
+    {
+        try
+        {
+            NormalizeBaseUrl(baseUrl);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ArgumentException(
+                $"{propertyPath} '{baseUrl}' is invalid: {ex.Message} " +
+                "If BaseUrl was not set explicitly, check the XYO_API_BASE_URL environment variable.",
+                paramName, ex);
+        }
+    }
+
     private static bool IsLoopbackHost(string host)
     {
         return string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) ||
