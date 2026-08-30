@@ -65,10 +65,18 @@ jobs:
       - name: Build, Format and Test Solution
         run: |
           dotnet restore Xyo.Sdk.sln
-          # Verifies hand-written code stays formatted, without rewriting the freshly generated tree --
-          # `dotnet format` on the whole solution would silently reformat generated output before the diff
-          # is captured, so the committed code no longer matches what the generator actually produced.
+
+          # Format the freshly generated tree before the diff is captured. The generator's raw output is
+          # not formatted to this repository's rules, but CI runs `dotnet format Xyo.Sdk.sln
+          # --verify-no-changes` across the whole solution, Xyo.Generated included. Leaving the output raw
+          # therefore produced regeneration PRs that always failed formatting, on whitespace and brace
+          # placement in files nobody had touched. Formatting here reproduces what is already committed on
+          # main, so a regeneration diff shows real changes instead of style churn.
+          dotnet format src/Xyo.Generated/Xyo.Generated.csproj
+
+          # Hand-written code must already be formatted; regeneration is not licence to rewrite it.
           dotnet format src/Xyo.Sdk/Xyo.Sdk.csproj --verify-no-changes
+
           dotnet build Xyo.Sdk.sln -c Release --no-restore
           dotnet test Xyo.Sdk.sln -c Release --no-build
 
