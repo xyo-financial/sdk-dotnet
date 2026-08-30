@@ -101,6 +101,10 @@ public sealed class XyoClientOptions
         // ToConfig throws from the init accessor before XyoClient's constructor ever runs, and the DI path
         // (the primary one for hosted applications) reports only "must use HTTPS" against a URL that
         // appears nowhere in the caller's own code or configuration files.
+        // This does mean BaseUrl is normalised twice: once here and once by the init accessor below.
+        // That is deliberate. The alternative, catching around the object initialiser, has to filter on
+        // ParamName to avoid reporting a DefaultHeaders CRLF rejection as a BaseUrl problem, and the
+        // saving is one Uri.TryCreate per config construction (once per process for a DI singleton).
         XyoClientConfig.ValidateEffectiveBaseUrl(BaseUrl, "XyoClientOptions.BaseUrl", nameof(BaseUrl));
 
         return new XyoClientConfig(ApiKey)

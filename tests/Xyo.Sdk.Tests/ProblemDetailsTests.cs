@@ -81,4 +81,39 @@ public class ProblemDetailsTests
         Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
         Assert.True(ex.IsRetryable());
     }
+
+    [Fact]
+    public void FromJson_UnparseableBody_FlattensControlCharactersInMessage()
+    {
+        // The fallback fires when the body is not parseable JSON despite a JSON content type, which is
+        // precisely the malformed-or-hostile upstream case (a proxy HTML error page, a truncated response).
+        // Before this was shared with SafeSummary, that path substring'd the payload straight into
+        // Exception.Message, so ESC, NUL and U+2028 all reached the log intact (CWE-117).
+        const char esc = '\u001b';
+        const char lineSeparator = '\u2028';
+        string hostile = $"not json{esc}[31mANSI\n2026-08-30 INFO forged line{lineSeparator}sep\0nul";
+
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, hostile);
+
+        Assert.DoesNotContain(esc, ex.Message);
+        Assert.DoesNotContain('\n', ex.Message);
+        Assert.DoesNotContain('\r', ex.Message);
+        Assert.DoesNotContain(lineSeparator, ex.Message);
+        Assert.DoesNotContain('\0', ex.Message);
+
+        // Full fidelity is still available for callers that opt in.
+        Assert.Equal(hostile, ex.RawResponseBody);
+    }
+
+    [Fact]
+    public void FromJson_UnparseableBodyStraddlingTheClamp_DoesNotEmitLoneSurrogate()
+    {
+        // A surrogate pair positioned so a naive Substring(0, 512) would split it.
+        string hostile = new string('B', 511) + "\U0001F600" + "tail";
+
+        var ex = XyoProblemDetailsException.FromJson(HttpStatusCode.BadRequest, hostile);
+
+        string trimmed = ex.Message.TrimEnd('\u2026');
+        Assert.False(char.IsSurrogate(trimmed[^1]), "clamped message must not end in a lone surrogate");
+    }
 }

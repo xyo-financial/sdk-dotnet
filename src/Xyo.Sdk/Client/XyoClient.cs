@@ -17,6 +17,7 @@ using Xyo.Generated.Api;
 using Xyo.Generated.Client;
 using Xyo.Generated.Model;
 using Xyo.Sdk.Exceptions;
+using Xyo.Sdk.Internal;
 using Xyo.Sdk.Security;
 using Xyo.Sdk.Streaming;
 
@@ -556,7 +557,7 @@ public sealed class XyoClient : IXyoClient
                     // Carry a bounded, log-safe prefix so the failure is diagnosable: whether this was a
                     // gateway HTML error page, a truncated proxy response, or a genuinely oversized payload
                     // is otherwise unanswerable without reproducing the call under a packet capture.
-                    string prefix = FlattenControlCharacters(new string(buffer, 0, Math.Min(totalRead, OversizeDiagnosticChars)));
+                    string prefix = LogSafeText.FlattenControlCharacters(new string(buffer, 0, Math.Min(totalRead, OversizeDiagnosticChars)));
                     throw new XyoServerException(statusCode,
                         $"API response exceeded the maximum supported size of {MaxUnaryResponseChars} characters.",
                         rawResponseBody: prefix);
@@ -739,48 +740,7 @@ public sealed class XyoClient : IXyoClient
             return $"[HTTP {statusCode}] {fallback}";
         }
 
-        const int maxLength = 512;
-        string flattened = FlattenControlCharacters(rawPayload);
-        string clamped = Truncate(flattened, maxLength);
-        return $"[HTTP {statusCode}] {clamped}";
-    }
-
-    /// <summary>
-    /// Replaces every control character -- not just CR/LF -- with a space. CR/LF alone (the original
-    /// CWE-117 fix) leaves U+2028/U+2029 (line separators to most JS-based log viewers), ESC (ANSI escape
-    /// injection into a terminal-rendered log), and NUL (message truncation in C-based sinks) all intact.
-    /// <c>char.IsControl</c> already covers everything TarStreamReader.ValidateEntryName checks for; this
-    /// adds the two Unicode line separators it does not.
-    /// </summary>
-    private static string FlattenControlCharacters(string raw) =>
-        string.Create(raw.Length, raw, static (span, src) =>
-        {
-            for (int i = 0; i < src.Length; i++)
-            {
-                char c = src[i];
-                span[i] = (char.IsControl(c) || c == '\u2028' || c == '\u2029') ? ' ' : c;
-            }
-        });
-
-    /// <summary>
-    /// Truncates to at most <paramref name="maxLength"/> UTF-16 code units without splitting a surrogate
-    /// pair, which a naive <c>value[..maxLength]</c> can do and which some structured-log serializers
-    /// reject outright as invalid UTF-16.
-    /// </summary>
-    private static string Truncate(string value, int maxLength)
-    {
-        if (value.Length <= maxLength)
-        {
-            return value;
-        }
-
-        int cut = maxLength;
-        if (cut > 0 && char.IsHighSurrogate(value[cut - 1]))
-        {
-            cut--;
-        }
-
-        return string.Concat(value.AsSpan(0, cut), "…");
+        return $"[HTTP {statusCode}] {LogSafeText.Summarize(rawPayload)}";
     }
 
     private static (int? retryAfter, int? limit, int? remaining, int? reset) ParseRateLimitHeaders(HttpResponseMessage response)
