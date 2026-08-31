@@ -5,7 +5,6 @@ using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xyo.Sdk.Internal;
@@ -250,11 +249,16 @@ public sealed record XyoClientConfig
     }
 
     /// <summary>
-    /// Gets the logger factory <see cref="XyoClient"/> builds its single <see cref="ILogger{TCategoryName}"/>
-    /// from, once, at construction time. Defaults to <see cref="NullLoggerFactory.Instance"/> (no-op logging)
-    /// when never set, which keeps a hand-constructed client -- which has no DI container to fall back on --
-    /// working exactly as before this property existed.
+    /// Gets the logger factory used for the SDK's diagnostic log messages (rate limiting, refused download
+    /// redirects, download bound violations, and unexpected operation failures). Defaults to
+    /// <see cref="NullLoggerFactory.Instance"/> (no-op logging) when never set, which keeps a hand-constructed
+    /// client working without a DI container.
     /// </summary>
+    /// <remarks>
+    /// Never receives the request or response body, the Bearer token, or any other credential -- the same
+    /// redaction this type's own <see cref="ToString"/> already applies to <see cref="ApiKey"/> holds for
+    /// every log record the SDK writes through this factory.
+    /// </remarks>
     [AllowNull]
     public ILoggerFactory LoggerFactory
     {

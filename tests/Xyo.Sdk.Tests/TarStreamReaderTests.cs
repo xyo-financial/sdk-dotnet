@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics.Metrics;
 using System.Formats.Tar;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Text;
 using System.Net;
 using System.Threading;
@@ -9,11 +12,40 @@ using System.Threading.Tasks;
 using Xunit;
 using Xyo.Sdk.Exceptions;
 using Xyo.Sdk.Streaming;
+using Xyo.Sdk.Telemetry;
 
 namespace Xyo.Sdk.Tests;
 
 public class TarStreamReaderTests
 {
+    /// <summary>
+    /// Listens to <see cref="XyoTelemetry.DownloadBoundTrippedCount"/> and returns the recorded
+    /// <c>xyo.sdk.bound</c> tag values, in order.
+    /// </summary>
+    private static (MeterListener Listener, List<string?> BoundTags) ListenToBoundTrippedTags()
+    {
+        var boundTags = new List<string?>();
+        var listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, source) =>
+            {
+                if (instrument.Meter.Name == XyoTelemetry.Name && instrument.Name == "xyo.sdk.download.bound_tripped.count")
+                {
+                    source.EnableMeasurementEvents(instrument);
+                }
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, _, tags, _) =>
+        {
+            lock (boundTags)
+            {
+                boundTags.Add(tags.ToArray().FirstOrDefault(t => t.Key == XyoTelemetry.BoundTagKey).Value?.ToString());
+            }
+        });
+        listener.Start();
+        return (listener, boundTags);
+    }
+
     private static string CompleteRecordJson(string merchant) =>
         $@"{{ ""merchant"": ""{merchant}"", ""description"": ""Desc"", ""categories"": [""General""], ""logo"": ""https://cdn.xyo.financial/logo.png"", ""location"": ""London, UK"", ""address"": ""1 High St"" }}";
 
@@ -397,5 +429,103 @@ public class TarStreamReaderTests
         Assert.Throws<NotSupportedException>(() => boundedStream.Write(new byte[1], 0, 1));
 
         boundedStream.Flush(); // delegates to the inner stream and must not throw
+    }
+
+    // ---------- xyo.sdk.download.bound_tripped.count tag coverage (PR review S1/S10) ----------
+    //
+    // The tag value is a structural constant passed at each call site (XyoTelemetry.Bound*), not derived by
+    // matching the human-readable exception message text, precisely so these tests keep meaning even if a
+    // message is reworded for clarity. Previously this counter had no test coverage at all.
+
+    [Fact]
+    public async Task StreamArchiveAsync_WireSizeExceeded_RecordsMaxArchiveBytesBoundTag()
+    {
+        var (listener, boundTags) = ListenToBoundTrippedTags();
+        using var _l = listener;
+
+        byte[] archiveBytes = CreateValidTarGz(("001.json", CompleteRecordJson("M1")));
+        using var ms = new MemoryStream(archiveBytes);
+
+        await Assert.ThrowsAsync<XyoClientException>(() => TarStreamReader.ReadArchiveAsync(ms, maxArchiveBytes: 50));
+
+        Assert.Contains(XyoTelemetry.BoundMaxArchiveBytes, boundTags);
+    }
+
+    [Fact]
+    public async Task StreamArchiveAsync_DecompressedSizeExceeded_RecordsMaxDecompressedBytesBoundTag()
+    {
+        var (listener, boundTags) = ListenToBoundTrippedTags();
+        using var _l = listener;
+
+        string bigRecord =
+            @"{ ""merchant"": ""M"", ""description"": """ + new string('A', 80_000) + @""", " +
+            @"""categories"": [""General""], ""logo"": ""https://cdn.xyo.financial/logo.png"", " +
+            @"""location"": ""London, UK"", ""address"": ""1 High St"" }";
+        byte[] archiveBytes = CreateValidTarGz(
+            ("001.json", bigRecord),
+            ("002.json", bigRecord),
+            ("003.json", bigRecord));
+        using var ms = new MemoryStream(archiveBytes);
+
+        await Assert.ThrowsAsync<XyoClientException>(() =>
+            TarStreamReader.ReadArchiveAsync(ms, maxDecompressedBytes: 150_000, maxEntryBytes: 200_000));
+
+        Assert.Contains(XyoTelemetry.BoundMaxDecompressedBytes, boundTags);
+    }
+
+    [Fact]
+    public async Task StreamArchiveAsync_TarHeaderDeclaresOversizeEntry_RecordsMaxEntryBytesBoundTag()
+    {
+        // The tar header's own declared entry length trips this, not BoundedReadStream counting bytes as
+        // they stream past -- see the next test for that path. Both must record the same tag (S2): whether
+        // this bound shows up in metrics must not depend on whether the header was honest about the size of
+        // an attacker-controlled entry.
+        var (listener, boundTags) = ListenToBoundTrippedTags();
+        using var _l = listener;
+
+        string largeRecord = @"{ ""merchant"": """ + new string('A', 2000) + @""" }";
+        byte[] archiveBytes = CreateValidTarGz(("large.json", largeRecord));
+        using var ms = new MemoryStream(archiveBytes);
+
+        await Assert.ThrowsAsync<XyoClientException>(() => TarStreamReader.ReadArchiveAsync(ms, maxEntryBytes: 100));
+
+        Assert.Contains(XyoTelemetry.BoundMaxEntryBytes, boundTags);
+    }
+
+    [Fact]
+    public void BoundedReadStream_EntryStreamExceedsLimit_RecordsMaxEntryBytesBoundTag()
+    {
+        var (listener, boundTags) = ListenToBoundTrippedTags();
+        using var _l = listener;
+
+        byte[] sourceData = new byte[200];
+        using var memoryStream = new MemoryStream(sourceData);
+        using var boundedStream = new TarStreamReader.BoundedReadStream(memoryStream, maxBytes: 50,
+            entryName: "test.json", boundTag: XyoTelemetry.BoundMaxEntryBytes);
+
+        Assert.Throws<XyoClientException>(() =>
+        {
+            Span<byte> buffer = new byte[100];
+            boundedStream.Read(buffer);
+        });
+
+        Assert.Contains(XyoTelemetry.BoundMaxEntryBytes, boundTags);
+    }
+
+    [Fact]
+    public async Task StreamArchiveAsync_EntryCountExceeded_RecordsMaxTarEntriesBoundTag()
+    {
+        byte[] archiveBytes = CreateValidTarGz(
+            ("1.json", CompleteRecordJson("M1")),
+            ("2.json", CompleteRecordJson("M2")),
+            ("3.json", CompleteRecordJson("M3")));
+        using var ms = new MemoryStream(archiveBytes);
+
+        var (listener, boundTags) = ListenToBoundTrippedTags();
+        using var _l = listener;
+
+        await Assert.ThrowsAsync<XyoClientException>(() => TarStreamReader.ReadArchiveAsync(ms, maxTarEntries: 2));
+
+        Assert.Contains(XyoTelemetry.BoundMaxTarEntries, boundTags);
     }
 }

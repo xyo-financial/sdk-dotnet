@@ -376,6 +376,31 @@ catch (XyoNetworkException ex)
 
 ---
 
+## 📡 Observability with OpenTelemetry
+
+The SDK ships first-class OpenTelemetry instrumentation with no external dependency: a single `ActivitySource` for distributed tracing and a single `Meter` for metrics, both named **`Xyo.Sdk`** and versioned with the assembly.
+
+- **Tracing:** one client span per public operation (`EnrichTransaction`, `EnrichTransactions`, `GetEnrichmentStatus`, `StreamEnrichmentCollection`), carrying HTTP semantic-convention attributes (`http.request.method`, `server.address`, `http.response.status_code`) plus SDK-specific attributes (batch size, archive entry count, bytes inflated, redirect hop count). Span status is derived from the typed exception hierarchy, so a `RateLimitException` is distinguishable from a `XyoNetworkException` in the trace backend. A parent context comes from either a caller-supplied `traceparent` or an ambient `Activity.Current` (e.g. an application that has already adopted OpenTelemetry, such as ASP.NET Core instrumentation), and either way the SDK's own child span -- not the caller's raw id -- is what goes out on the wire, always in valid W3C format.
+- **Metrics:** a request counter and duration histogram tagged by operation and outcome, plus counters for rate-limit responses, refused download redirects, and every download safety bound that can trip (archive bytes, decompressed bytes, entry bytes, entry count, idle timeout, total duration, redirect count). `StreamEnrichmentCollectionAsync` records its own outcome even when the caller abandons enumeration early (`break`, `.Take(n)`, `.FirstOrDefaultAsync()`), tagged `abandoned` rather than being silently uncounted.
+- **Logging:** not yet part of this SDK version; tracked separately (see the CHANGELOG).
+
+Every instrument is inert until something listens: no `Activity` is allocated, and no metric tag list is built, unless a listener is registered against the `Xyo.Sdk` source or meter. No span attribute, metric tag, or log message the SDK constructs ever contains the API key: every tag value is a compile-time literal from a closed set, and a span's error status carries only a low-cardinality outcome classification (e.g. `network_error`), never the exception message itself. That message, and the raw server response text it can embed (an RFC 7807 `detail` string, a truncated error body, or -- from a gateway that echoes request headers into an error page -- content an upstream party chose), stays off the span and is available to a caller who opts in via `Exception.Message` and `RawResponseBody` on the SDK's exception types.
+
+### Minimal Registration Example
+
+```csharp
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing.AddSource("Xyo.Sdk").AddOtlpExporter())
+    .WithMetrics(metrics => metrics.AddMeter("Xyo.Sdk").AddOtlpExporter());
+```
+
+---
+
 ## 🔒 Security & Defensive Architecture
 
 - **Zero-Trust Domain Egress Allowlist:** Validates all archive download URLs against pinned official domains (`api.xyo.financial`, `download.xyo.financial`, AWS S3 storage hosts) and strictly rejects cleartext HTTP.

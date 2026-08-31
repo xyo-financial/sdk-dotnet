@@ -2,7 +2,6 @@ using System;
 using System.Net.Http;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Xyo.Sdk.Client;
@@ -180,7 +179,6 @@ public static class ServiceCollectionExtensions
         {
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             var httpClient = httpClientFactory.CreateClient(HttpClientName);
-
             // Container ILoggerFactory fallback: applied only when the caller has not explicitly configured
             // one on config (see XyoClientConfig.IsLoggerFactoryExplicit).
             var effectiveConfig = config;
