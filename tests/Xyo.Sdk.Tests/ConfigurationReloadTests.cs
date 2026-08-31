@@ -95,10 +95,10 @@ public class ConfigurationReloadTests
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(SingleRecordTarGz()) };
         });
         using var httpClient = new HttpClient(handler);
-        var monitor = new TestOptionsMonitor<XyoClientOptions>(new XyoClientOptions { ApiKey = "xyo_test_key", DownloadTimeout = TimeSpan.FromSeconds(30) });
+        var monitor = new TestOptionsMonitor<XyoClientOptions>(new XyoClientOptions { ApiKey = "xyo_test_key", DownloadConnectTimeout = TimeSpan.FromSeconds(30) });
         using var client = new XyoClient(monitor, httpClient);
 
-        monitor.Change(new XyoClientOptions { ApiKey = "xyo_test_key", DownloadTimeout = TimeSpan.FromMilliseconds(50) });
+        monitor.Change(new XyoClientOptions { ApiKey = "xyo_test_key", DownloadConnectTimeout = TimeSpan.FromMilliseconds(50) });
 
         var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
         {

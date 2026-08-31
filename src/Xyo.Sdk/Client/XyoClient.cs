@@ -338,8 +338,8 @@ public sealed class XyoClient : IXyoClient
         }
 
         _logger.LogInformation(
-            "XyoClientOptions reload applied: BaseUrl={BaseUrl}, TrustedDownloadHosts={TrustedHostCount}, Timeout={TimeoutSeconds}s, DownloadTimeout={DownloadTimeoutSeconds}s.",
-            newConfig.BaseUrl, newConfig.TrustedDownloadHosts.Count, newConfig.Timeout.TotalSeconds, newConfig.DownloadTimeout.TotalSeconds);
+            "XyoClientOptions reload applied: BaseUrl={BaseUrl}, TrustedDownloadHosts={TrustedHostCount}, Timeout={TimeoutSeconds}s, DownloadConnectTimeout={DownloadConnectTimeoutSeconds}s, ReadIdleTimeout={ReadIdleTimeoutSeconds}s.",
+            newConfig.BaseUrl, newConfig.TrustedDownloadHosts.Count, newConfig.Timeout.TotalSeconds, newConfig.DownloadConnectTimeout.TotalSeconds, newConfig.ReadIdleTimeout.TotalSeconds);
     }
 
     /// <summary>
