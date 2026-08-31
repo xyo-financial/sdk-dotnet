@@ -1,10 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Xyo.Sdk.Internal;
 
 namespace Xyo.Sdk.Client;
 
@@ -50,6 +54,7 @@ public sealed record XyoClientConfig
     private string _baseUrl = ResolveDefaultBaseUrl();
     private IReadOnlyDictionary<string, string> _defaultHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<string> _trustedDownloadHosts = Array.Empty<string>();
+    private readonly ILoggerFactory? _loggerFactory;
 
     /// <summary>
     /// Gets the static API token.
@@ -245,6 +250,33 @@ public sealed record XyoClientConfig
     }
 
     /// <summary>
+    /// Gets the logger factory <see cref="XyoClient"/> builds its single <see cref="ILogger{TCategoryName}"/>
+    /// from, once, at construction time. Defaults to <see cref="NullLoggerFactory.Instance"/> (no-op logging)
+    /// when never set, which keeps a hand-constructed client -- which has no DI container to fall back on --
+    /// working exactly as before this property existed.
+    /// </summary>
+    [AllowNull]
+    public ILoggerFactory LoggerFactory
+    {
+        get => _loggerFactory ?? NullLoggerFactory.Instance;
+        // [AllowNull] lets XyoClientOptions.ToConfig() assign its own nullable LoggerFactory straight
+        // through: null here means "not configured" (see IsLoggerFactoryExplicit) exactly as it does there,
+        // so there is no distinct null-handling step needed at the call site.
+        init => _loggerFactory = value;
+    }
+
+    /// <summary>
+    /// Whether <see cref="LoggerFactory"/> was explicitly set on this instance, including explicitly to
+    /// <see cref="NullLoggerFactory.Instance"/> to deliberately silence the SDK. Tracked via a nullable
+    /// backing field rather than by reference-comparing <see cref="LoggerFactory"/> against
+    /// <see cref="NullLoggerFactory.Instance"/>, so a caller who sets it to exactly that instance to opt out
+    /// of logging is not mistaken for a caller who never touched it at all -- the distinction the DI
+    /// registration (<see cref="Extensions.ServiceCollectionExtensions"/>) needs to decide whether to wire in
+    /// the container's own <see cref="ILoggerFactory"/>.
+    /// </summary>
+    internal bool IsLoggerFactoryExplicit => _loggerFactory != null;
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="XyoClientConfig"/> class.
     /// </summary>
     public XyoClientConfig(string? apiKey = null)
@@ -410,9 +442,15 @@ public sealed record XyoClientConfig
 
         string trimmed = baseUrl.TrimEnd('/');
 
+        // This message (like every one below) reaches Exception.Message, which XyoClient.OnOptionsChanged
+        // logs on a config reload -- see LogSafeText's own remarks on why anything reachable from there must
+        // be flattened. The candidate value itself is legitimately useful for diagnosis (e.g. tracing a bad
+        // XYO_API_BASE_URL), so it is clamped and control-character-flattened rather than omitted outright.
+        string safeBaseUrl = LogSafeText.Summarize(baseUrl, 256);
+
         if (!Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
         {
-            throw new ArgumentException($"Base URL '{baseUrl}' is not a valid absolute URI.", nameof(baseUrl));
+            throw new ArgumentException($"Base URL '{safeBaseUrl}' is not a valid absolute URI.", nameof(baseUrl));
         }
 
         if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
@@ -421,7 +459,7 @@ public sealed record XyoClientConfig
             if (!isHttpLoopback)
             {
                 throw new ArgumentException(
-                    $"Base URL '{baseUrl}' must use HTTPS (plain HTTP is only permitted for loopback hosts, to avoid transmitting the API key in cleartext).",
+                    $"Base URL '{safeBaseUrl}' must use HTTPS (plain HTTP is only permitted for loopback hosts, to avoid transmitting the API key in cleartext).",
                     nameof(baseUrl));
             }
         }
@@ -433,15 +471,20 @@ public sealed record XyoClientConfig
         // host root) -- so those components are rejected outright rather than validated-then-ignored.
         if (!string.IsNullOrEmpty(uri.UserInfo))
         {
-            throw new ArgumentException($"Base URL '{baseUrl}' must not contain user info (e.g. 'user:pass@').", nameof(baseUrl));
+            // Never echo the credential itself (uri.UserInfo, or baseUrl/safeBaseUrl, both of which still
+            // carry it): this message reaches Exception.Message, and from there XyoClient.OnOptionsChanged's
+            // ILogger on the reload path. Name the host and the fix instead.
+            throw new ArgumentException(
+                $"Base URL for host '{uri.Host}' must not contain user info (e.g. 'user:pass@'); remove the credential and use ApiKey or ApiKeySupplier instead.",
+                nameof(baseUrl));
         }
         if (!string.IsNullOrEmpty(uri.Query))
         {
-            throw new ArgumentException($"Base URL '{baseUrl}' must not contain a query string.", nameof(baseUrl));
+            throw new ArgumentException($"Base URL '{safeBaseUrl}' must not contain a query string.", nameof(baseUrl));
         }
         if (!string.IsNullOrEmpty(uri.Fragment))
         {
-            throw new ArgumentException($"Base URL '{baseUrl}' must not contain a fragment.", nameof(baseUrl));
+            throw new ArgumentException($"Base URL '{safeBaseUrl}' must not contain a fragment.", nameof(baseUrl));
         }
 
         return trimmed;
@@ -467,8 +510,10 @@ public sealed record XyoClientConfig
         }
         catch (ArgumentException ex)
         {
+            // baseUrl is clamped/flattened here for the same reason NormalizeBaseUrl does it to its own copy:
+            // this message reaches Exception.Message and, on the reload path, an ILogger sink.
             throw new ArgumentException(
-                $"{propertyPath} '{baseUrl}' is invalid: {ex.Message} " +
+                $"{propertyPath} '{LogSafeText.Summarize(baseUrl, 256)}' is invalid: {ex.Message} " +
                 "If BaseUrl was not set explicitly, check the XYO_API_BASE_URL environment variable.",
                 paramName, ex);
         }

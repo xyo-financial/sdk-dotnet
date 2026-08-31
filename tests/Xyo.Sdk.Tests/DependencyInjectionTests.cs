@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Xunit;
 using Xyo.Sdk.Client;
@@ -85,4 +86,56 @@ public class DependencyInjectionTests
         var factoryOptions = optionsMonitor.Get(ServiceCollectionExtensions.HttpClientName);
         Assert.Equal(Timeout.InfiniteTimeSpan, factoryOptions.HandlerLifetime);
     }
+
+    [Fact]
+    public void AddXyoClient_WithExplicitConfig_WithoutLoggerFactory_FallsBackToContainerLoggerFactory()
+    {
+        var services = new ServiceCollection();
+        var testFactory = new TestLoggerFactory();
+        services.AddSingleton<ILoggerFactory>(testFactory);
+
+        var config = new XyoClientConfig("xyo_explicit_key");
+        services.AddXyoClient(config);
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var client = serviceProvider.GetRequiredService<IXyoClient>();
+
+        Assert.NotNull(client);
+        Assert.Contains(typeof(XyoClient).FullName!, testFactory.CreatedCategories);
+    }
+
+    [Fact]
+    public void AddXyoClient_WithExplicitConfig_WithExplicitNullLoggerFactory_PreservesExplicitChoice()
+    {
+        var services = new ServiceCollection();
+        var testFactory = new TestLoggerFactory();
+        services.AddSingleton<ILoggerFactory>(testFactory);
+
+        var config = new XyoClientConfig("xyo_explicit_key")
+        {
+            LoggerFactory = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance
+        };
+        services.AddXyoClient(config);
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var client = serviceProvider.GetRequiredService<IXyoClient>();
+
+        Assert.NotNull(client);
+        Assert.DoesNotContain(typeof(XyoClient).FullName!, testFactory.CreatedCategories);
+    }
+
+    private sealed class TestLoggerFactory : ILoggerFactory
+    {
+        public System.Collections.Generic.List<string> CreatedCategories { get; } = new();
+
+        public ILogger CreateLogger(string categoryName)
+        {
+            CreatedCategories.Add(categoryName);
+            return Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+        }
+
+        public void AddProvider(ILoggerProvider provider) { }
+        public void Dispose() { }
+    }
 }
+
