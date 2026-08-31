@@ -316,16 +316,23 @@ public sealed class XyoClient : IXyoClient
                 "XyoClientOptions reload was rejected: {Reason}. XyoClient continues serving requests with its last valid configuration.",
                 LogSafeText.Summarize(ex.Message));
 
-            try
+            var handlers = OptionsReloadFailed;
+            if (handlers != null)
             {
-                OptionsReloadFailed?.Invoke(this, ex);
-            }
-            catch (Exception handlerEx)
-            {
-                // A subscriber's exception must not propagate out of this handler: it would fault the
-                // options change-token infrastructure's thread, the exact failure mode this whole method
-                // exists to prevent for the reload itself.
-                _logger.LogError(handlerEx, "An OptionsReloadFailed handler threw; ignored.");
+                foreach (EventHandler<Exception> handler in handlers.GetInvocationList())
+                {
+                    try
+                    {
+                        handler(this, ex);
+                    }
+                    catch (Exception handlerEx)
+                    {
+                        // A subscriber's exception must not propagate out of this handler: it would fault the
+                        // options change-token infrastructure's thread, the exact failure mode this whole method
+                        // exists to prevent for the reload itself.
+                        _logger.LogError(handlerEx, "An OptionsReloadFailed handler threw; ignored.");
+                    }
+                }
             }
             return;
         }

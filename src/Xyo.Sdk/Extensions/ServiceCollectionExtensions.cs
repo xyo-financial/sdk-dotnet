@@ -180,7 +180,20 @@ public static class ServiceCollectionExtensions
         {
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             var httpClient = httpClientFactory.CreateClient(HttpClientName);
-            return new XyoClient(config, httpClient);
+
+            // Container ILoggerFactory fallback: applied only when the caller has not explicitly configured
+            // one on config (see XyoClientConfig.IsLoggerFactoryExplicit).
+            var effectiveConfig = config;
+            if (!config.IsLoggerFactoryExplicit)
+            {
+                var containerLoggerFactory = sp.GetService<ILoggerFactory>();
+                if (containerLoggerFactory != null)
+                {
+                    effectiveConfig = config with { LoggerFactory = containerLoggerFactory };
+                }
+            }
+
+            return new XyoClient(effectiveConfig, httpClient);
         });
 
         return builder;

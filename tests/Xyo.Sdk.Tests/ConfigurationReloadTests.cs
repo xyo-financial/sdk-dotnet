@@ -270,4 +270,37 @@ public class ConfigurationReloadTests
 
         Assert.Equal(0, monitor.ListenerCount);
     }
+
+    [Fact]
+    public void OptionsReload_MultipleSubscribers_InvokesSubsequentSubscribersEvenIfFirstThrows()
+    {
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, "{}");
+        using var httpClient = new HttpClient(handler);
+        var monitor = new TestOptionsMonitor<XyoClientOptions>(new XyoClientOptions { ApiKey = "xyo_test_key" });
+        using var client = new XyoClient(monitor, httpClient);
+
+        bool firstInvoked = false;
+        bool secondInvoked = false;
+        Exception? receivedException = null;
+
+        client.OptionsReloadFailed += (_, _) =>
+        {
+            firstInvoked = true;
+            throw new InvalidOperationException("First subscriber failed.");
+        };
+
+        client.OptionsReloadFailed += (_, ex) =>
+        {
+            secondInvoked = true;
+            receivedException = ex;
+        };
+
+        monitor.Change(new XyoClientOptions { ApiKey = "xyo_test_key", BaseUrl = "ftp://invalid-scheme" });
+
+        Assert.True(firstInvoked);
+        Assert.True(secondInvoked);
+        Assert.NotNull(receivedException);
+        Assert.IsType<ArgumentException>(receivedException);
+    }
 }
+
