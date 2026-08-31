@@ -11,7 +11,6 @@ using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
 using Xunit;
 using Xyo.Sdk.Client;
 using Xyo.Sdk.Exceptions;
@@ -207,6 +206,78 @@ public class TelemetryTests
         Assert.False(handler.CapturedRequests[0].Headers.NonValidated.Contains("traceparent"));
     }
 
+    [Fact]
+    public async Task EnrichTransactionAsync_AmbientActivityCurrent_NoCallerTraceparent_PropagatesOwnSpanOnTheWire()
+    {
+        // Reproduces the primary OpenTelemetry use case (PR review C3a): an application that has already
+        // adopted OpenTelemetry has Activity.Current set (e.g. from ASP.NET Core instrumentation) and never
+        // passes a raw traceparent string. The SDK's own client span must still propagate onto the wire.
+        var (listener, activities) = ListenToXyoActivities();
+        using var _l = listener;
+
+        using var ambientSource = new ActivitySource("Xyo.Sdk.Tests.AmbientParent");
+        using var ambientListener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == "Xyo.Sdk.Tests.AmbientParent",
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded
+        };
+        ActivitySource.AddActivityListener(ambientListener);
+
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, EnrichmentJson);
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        using var ambientActivity = ambientSource.StartActivity("AmbientServerSpan", ActivityKind.Server);
+        Assert.NotNull(ambientActivity);
+
+        await client.EnrichTransactionAsync("UBER TRIP", "GB");
+
+        var activity = Assert.Single(activities);
+        Assert.Equal(ambientActivity!.TraceId, activity.TraceId);
+        Assert.Equal(ambientActivity.SpanId, activity.ParentSpanId);
+
+        string sentTraceparent = handler.CapturedRequests[0].Headers.GetValues("traceparent").Single();
+        Assert.Equal(activity.Id, sentTraceparent);
+        Assert.Contains(ambientActivity.TraceId.ToHexString(), sentTraceparent);
+    }
+
+    [Fact]
+    public async Task EnrichTransactionAsync_LegacyHierarchicalIdFormat_NeverEmitsNonW3CTraceparent()
+    {
+        // Reproduces PR review C3b: under a legacy Activity.DefaultIdFormat = Hierarchical configuration,
+        // Activity.Id is not a valid traceparent, so it must never be sent verbatim under a header whose
+        // format the SDK validates and enforces everywhere else.
+        var previousDefaultFormat = Activity.DefaultIdFormat;
+        var previousForceDefault = Activity.ForceDefaultIdFormat;
+        Activity.DefaultIdFormat = ActivityIdFormat.Hierarchical;
+        Activity.ForceDefaultIdFormat = true;
+        try
+        {
+            var (listener, activities) = ListenToXyoActivities();
+            using var _l = listener;
+
+            const string callerTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+            var handler = new MockHttpMessageHandler(HttpStatusCode.OK, EnrichmentJson);
+            using var httpClient = new HttpClient(handler);
+            using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+            await client.EnrichTransactionAsync("UBER TRIP", "GB", (string?)null, callerTraceparent);
+
+            var activity = Assert.Single(activities);
+            Assert.Equal(ActivityIdFormat.Hierarchical, activity.IdFormat);
+
+            string sentTraceparent = handler.CapturedRequests[0].Headers.GetValues("traceparent").Single();
+            Assert.Equal(callerTraceparent, sentTraceparent);
+            Assert.Matches(@"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$", sentTraceparent);
+        }
+        finally
+        {
+            Activity.ForceDefaultIdFormat = previousForceDefault;
+            Activity.DefaultIdFormat = previousDefaultFormat;
+        }
+    }
+
     // ---------- Tracing: archive download telemetry ----------
 
     private static byte[] TarGzOfRecords(int count)
@@ -275,6 +346,8 @@ public class TelemetryTests
     {
         var (listener, activities) = ListenToXyoActivities();
         using var _l = listener;
+        var (meterListener, measurements) = ListenToXyoMetrics();
+        using var _m = meterListener;
 
         var handler = new MockHttpMessageHandler((_, _) =>
         {
@@ -295,9 +368,17 @@ public class TelemetryTests
             }
         });
 
+        Assert.Contains(measurements, m => m.Name == "xyo.sdk.download.bound_tripped.count" &&
+            m.Tags.Any(t => t.Key == XyoTelemetry.BoundTagKey && Equals(t.Value, XyoTelemetry.BoundIdleTimeout)));
+
         var activity = Assert.Single(activities);
         Assert.Equal(ActivityStatusCode.Error, activity.Status);
-        Assert.Contains("stalled", activity.StatusDescription, StringComparison.OrdinalIgnoreCase);
+        // The status description is the low-cardinality outcome classification, not exception.Message: a
+        // stall exception's message is SDK-authored here, but the same span-status code path also handles
+        // exceptions whose message embeds raw server response text (see C4), so nothing exception-derived
+        // reaches the description at all -- see CompleteActivityStatus's remarks.
+        Assert.Equal("network_error", activity.StatusDescription);
+        Assert.Equal(typeof(XyoNetworkException).FullName, activity.GetTagItem("error.type"));
 
         object? bytesTransferred = activity.GetTagItem("xyo.sdk.download.bytes_transferred");
         Assert.NotNull(bytesTransferred);
@@ -329,43 +410,54 @@ public class TelemetryTests
         Assert.Contains(measurements, m => m.Name == "xyo.sdk.download.redirect_refused.count" && Convert.ToInt64(m.Value) == 1);
     }
 
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_ConsumerBreaksEarly_StillRecordsMetricsAndCompletesSpan()
+    {
+        // Reproduces PR review C1: a consumer abandoning enumeration (break, .Take(n),
+        // .FirstOrDefaultAsync()) must not be a silent gap in the request counter, the duration histogram,
+        // or the span status -- that would under-count exactly the traffic pattern a streaming API invites.
+        var (activityListener, activities) = ListenToXyoActivities();
+        using var _a = activityListener;
+        var (meterListener, measurements) = ListenToXyoMetrics();
+        using var _m = meterListener;
+
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new MemoryStream(TarGzOfRecords(3)))
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        int seen = 0;
+        await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz"))
+        {
+            seen++;
+            break;
+        }
+
+        Assert.Equal(1, seen);
+
+        var activity = Assert.Single(activities);
+        Assert.Equal(ActivityStatusCode.Ok, activity.Status);
+        Assert.Equal(true, activity.GetTagItem("xyo.sdk.stream.abandoned"));
+
+        Assert.Contains(measurements, m => m.Name == "xyo.sdk.client.request.count" &&
+            m.Tags.Any(t => t.Key == "xyo.sdk.outcome" && Equals(t.Value, "abandoned")) &&
+            Convert.ToInt64(m.Value) == 1);
+        Assert.Contains(measurements, m => m.Name == "xyo.sdk.client.request.duration" &&
+            m.Tags.Any(t => t.Key == "xyo.sdk.outcome" && Equals(t.Value, "abandoned")));
+    }
+
     // ---------- Hard requirement: no credential ever reaches telemetry ----------
 
-    private sealed class CapturingLogger : ILogger
-    {
-        public List<string> Messages { get; } = new();
-
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-        {
-            lock (Messages)
-            {
-                Messages.Add(formatter(state, exception));
-                if (exception != null)
-                {
-                    Messages.Add(exception.ToString());
-                }
-            }
-        }
-    }
-
-    private sealed class CapturingLoggerFactory : ILoggerFactory
-    {
-        public CapturingLogger Logger { get; } = new();
-
-        public ILogger CreateLogger(string categoryName) => Logger;
-
-        public void AddProvider(ILoggerProvider provider)
-        {
-        }
-
-        public void Dispose()
-        {
-        }
-    }
+    // A CapturingLogger/CapturingLoggerFactory pair, and a LoggerFactory assertion on this test, previously
+    // lived here. XyoClientConfig.LoggerFactory has been removed (see the comment in XyoClientConfig.cs):
+    // PR #36 owns logging going forward via an ILogger<XyoClient> resolved from DI, and this test's log-sink
+    // coverage should be restored against that mechanism once this branch rebases onto #36.
 
     [Fact]
     public async Task Telemetry_AcrossSuccessRateLimitAndRefusedRedirect_NeverContainsTheApiKey()
@@ -377,8 +469,7 @@ public class TelemetryTests
         var (meterListener, measurements) = ListenToXyoMetrics();
         using var _m = meterListener;
 
-        var loggerFactory = new CapturingLoggerFactory();
-        var config = new XyoClientConfig(secretApiKey) { LoggerFactory = loggerFactory };
+        var config = new XyoClientConfig(secretApiKey);
 
         var okHandler = new MockHttpMessageHandler(HttpStatusCode.OK, EnrichmentJson);
         using (var httpClient = new HttpClient(okHandler))
@@ -436,12 +527,6 @@ public class TelemetryTests
             {
                 Assert.DoesNotContain(secretApiKey, tag.Value?.ToString() ?? string.Empty);
             }
-        }
-
-        Assert.NotEmpty(loggerFactory.Logger.Messages);
-        foreach (var message in loggerFactory.Logger.Messages)
-        {
-            Assert.DoesNotContain(secretApiKey, message);
         }
     }
 }

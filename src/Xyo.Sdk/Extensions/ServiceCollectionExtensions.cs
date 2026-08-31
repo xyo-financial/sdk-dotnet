@@ -2,7 +2,6 @@ using System;
 using System.Net.Http;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Xyo.Sdk.Client;
@@ -196,22 +195,5 @@ public static class ServiceCollectionExtensions
         });
 
         return builder;
-    }
-
-    /// <summary>
-    /// Wires the container's registered <see cref="ILoggerFactory"/> into <paramref name="config"/> when the
-    /// caller has not already configured one of their own, so a DI-registered client logs through the
-    /// application's own logging pipeline without requiring every consumer to set
-    /// <see cref="XyoClientConfig.LoggerFactory"/> explicitly.
-    /// </summary>
-    private static XyoClientConfig ApplyDiLoggerFactory(XyoClientConfig config, IServiceProvider sp)
-    {
-        if (!ReferenceEquals(config.LoggerFactory, NullLoggerFactory.Instance))
-        {
-            return config;
-        }
-
-        var loggerFactory = sp.GetService<ILoggerFactory>();
-        return loggerFactory == null ? config : config with { LoggerFactory = loggerFactory };
     }
 }

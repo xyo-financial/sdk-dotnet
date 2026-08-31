@@ -25,7 +25,9 @@ public static class TarStreamReader
     /// </summary>
     /// <remarks>
     /// <b>Memory Warning:</b> Buffers all deserialized enrichment records into an in-memory list on the heap.
-    /// For high-volume pipelines or large datasets, prefer <see cref="StreamArchiveAsync"/> for streaming processing with an $O(1)$ memory footprint.
+    /// For high-volume pipelines or large datasets, prefer
+    /// <see cref="StreamArchiveAsync(Stream, long, long, long, int, CancellationToken)"/> for streaming
+    /// processing with an $O(1)$ memory footprint.
     /// </remarks>
     public static async Task<IReadOnlyList<EnrichmentResponse>> ReadArchiveAsync(
         Stream compressedStream,
@@ -46,13 +48,34 @@ public static class TarStreamReader
     /// <summary>
     /// Streams and yields enrichment records on-the-fly from a compressed .tar.gz stream with $O(1)$ memory footprint.
     /// </summary>
-    public static async IAsyncEnumerable<EnrichmentResponse> StreamArchiveAsync(
+    public static IAsyncEnumerable<EnrichmentResponse> StreamArchiveAsync(
         Stream compressedStream,
         long maxArchiveBytes = 104_857_600,
         long maxDecompressedBytes = 2_097_152_000,
         long maxEntryBytes = 10_485_760,
         int maxTarEntries = 50_000,
-        ArchiveTransferStatistics? statistics = null,
+        CancellationToken cancellationToken = default) =>
+        StreamArchiveAsync(compressedStream, maxArchiveBytes, maxDecompressedBytes, maxEntryBytes, maxTarEntries,
+            statistics: null, cancellationToken);
+
+    /// <summary>
+    /// Streams and yields enrichment records on-the-fly from a compressed .tar.gz stream with $O(1)$ memory
+    /// footprint, additionally reporting live progress through <paramref name="statistics"/>.
+    /// </summary>
+    /// <remarks>
+    /// Internal rather than a public overload: adding a parameter to the published, six-parameter public
+    /// <see cref="StreamArchiveAsync(Stream, long, long, long, int, CancellationToken)"/> would bake a
+    /// binary-breaking change into every assembly compiled against an earlier build (optional parameters
+    /// are resolved at the caller's call site, not the callee), with no corresponding major version bump.
+    /// <see cref="ArchiveTransferStatistics"/> is internal for the same reason -- see its own remarks.
+    /// </remarks>
+    internal static async IAsyncEnumerable<EnrichmentResponse> StreamArchiveAsync(
+        Stream compressedStream,
+        long maxArchiveBytes,
+        long maxDecompressedBytes,
+        long maxEntryBytes,
+        int maxTarEntries,
+        ArchiveTransferStatistics? statistics,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (compressedStream == null)
@@ -61,13 +84,15 @@ public static class TarStreamReader
         }
 
         // Bounded stream wrapper to track wire (compressed) bytes read against maxArchiveBytes
-        var wireStream = new BoundedReadStream(compressedStream, maxArchiveBytes, boundLabel: "download wire size");
+        var wireStream = new BoundedReadStream(compressedStream, maxArchiveBytes,
+            boundLabel: "download wire size", boundTag: XyoTelemetry.BoundMaxArchiveBytes);
 
         using var gzipStream = new GZipStream(wireStream, CompressionMode.Decompress, leaveOpen: true);
 
         // Independent bound on total INFLATED bytes -- this is the actual decompression-bomb defense.
         // maxArchiveBytes above only limits bytes taken off the wire before inflation.
-        var inflatedStream = new BoundedReadStream(gzipStream, maxDecompressedBytes, boundLabel: "decompressed content size");
+        var inflatedStream = new BoundedReadStream(gzipStream, maxDecompressedBytes,
+            boundLabel: "decompressed content size", boundTag: XyoTelemetry.BoundMaxDecompressedBytes);
 
         using var tarReader = new TarReader(inflatedStream, leaveOpen: true);
 
@@ -108,7 +133,8 @@ public static class TarStreamReader
             {
                 if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
                 {
-                    XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.bound", "max_tar_entries"));
+                    XyoTelemetry.DownloadBoundTrippedCount.Add(1,
+                        new KeyValuePair<string, object?>(XyoTelemetry.BoundTagKey, XyoTelemetry.BoundMaxTarEntries));
                 }
                 throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
                     $"Tar archive exceeds maximum entry count limit ({maxTarEntries} entries). Possible tar bomb DoS attack.");
@@ -137,6 +163,14 @@ public static class TarStreamReader
 
             if (entry.Length > maxEntryBytes)
             {
+                // Counted here too, not just when BoundedReadStream trips below: the tar header declares its
+                // own entry length, which an attacker controls, so whether this bound shows up in metrics
+                // must not depend on whether the header happened to be honest about the oversize entry.
+                if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
+                {
+                    XyoTelemetry.DownloadBoundTrippedCount.Add(1,
+                        new KeyValuePair<string, object?>(XyoTelemetry.BoundTagKey, XyoTelemetry.BoundMaxEntryBytes));
+                }
                 throw new XyoClientException(System.Net.HttpStatusCode.UnprocessableEntity,
                     $"Tar entry '{entryName}' exceeds maximum size limit ({maxEntryBytes} bytes). Decompression bomb rejected.");
             }
@@ -144,7 +178,8 @@ public static class TarStreamReader
             EnrichmentResponse? response;
             try
             {
-                var entryBoundedStream = new BoundedReadStream(entry.DataStream, maxEntryBytes, entryName);
+                var entryBoundedStream = new BoundedReadStream(entry.DataStream, maxEntryBytes, entryName,
+                    boundTag: XyoTelemetry.BoundMaxEntryBytes);
                 response = await JsonSerializer.DeserializeAsync<EnrichmentResponse>(entryBoundedStream, XyoClient.SerializerOptions, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -204,14 +239,28 @@ public static class TarStreamReader
         private readonly long _maxBytes;
         private readonly string? _entryName;
         private readonly string? _boundLabel;
+        private readonly string _boundTag;
         private long _totalBytesRead;
 
-        public BoundedReadStream(Stream innerStream, long maxBytes, string? entryName = null, string? boundLabel = null)
+        /// <param name="innerStream">The stream to read through.</param>
+        /// <param name="maxBytes">The byte ceiling that trips <see cref="ThrowMaxBytesExceeded"/>.</param>
+        /// <param name="entryName">Set for a per-entry bound; included in the thrown exception's message.</param>
+        /// <param name="boundLabel">Human-readable label interpolated into the thrown exception's message only.</param>
+        /// <param name="boundTag">
+        /// The <c>xyo.sdk.bound</c> metric tag value recorded when this bound trips. Deliberately a separate
+        /// parameter from <paramref name="boundLabel"/> rather than derived from it: coupling the metric
+        /// classification to prose meant for a human reader let a message reword silently reclassify which
+        /// bound tripped (see the PR review, C1/S1). Always pass one of <see cref="XyoTelemetry"/>'s
+        /// <c>Bound*</c> constants.
+        /// </param>
+        public BoundedReadStream(Stream innerStream, long maxBytes, string? entryName = null, string? boundLabel = null,
+            string boundTag = XyoTelemetry.BoundMaxArchiveBytes)
         {
             _innerStream = innerStream ?? throw new ArgumentNullException(nameof(innerStream));
             _maxBytes = maxBytes;
             _entryName = entryName;
             _boundLabel = boundLabel;
+            _boundTag = boundTag;
         }
 
         /// <summary>
@@ -280,15 +329,8 @@ public static class TarStreamReader
         {
             if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
             {
-                string bound = !string.IsNullOrWhiteSpace(_entryName)
-                    ? "max_entry_bytes"
-                    : _boundLabel switch
-                    {
-                        "download wire size" => "max_archive_bytes",
-                        "decompressed content size" => "max_decompressed_bytes",
-                        _ => "max_archive_bytes"
-                    };
-                XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.bound", bound));
+                XyoTelemetry.DownloadBoundTrippedCount.Add(1,
+                    new KeyValuePair<string, object?>(XyoTelemetry.BoundTagKey, _boundTag));
             }
 
             if (!string.IsNullOrWhiteSpace(_entryName))

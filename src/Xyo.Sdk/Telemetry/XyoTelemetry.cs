@@ -29,10 +29,22 @@ public static class XyoTelemetry
     /// </summary>
     public const string Name = "Xyo.Sdk";
 
-    private static readonly string Version =
-        typeof(XyoTelemetry).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-        ?? typeof(XyoTelemetry).Assembly.GetName().Version?.ToString()
-        ?? "0.0.0";
+    private static readonly string Version = ResolveInstrumentationVersion();
+
+    private static string ResolveInstrumentationVersion()
+    {
+        string raw =
+            typeof(XyoTelemetry).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(XyoTelemetry).Assembly.GetName().Version?.ToString()
+            ?? "0.0.0";
+
+        // SourceLink (PublishRepositoryUrl/EmbedUntrackedSources, see the csproj) appends
+        // "+{SourceRevisionId}" to the informational version. Left in place, that would make the
+        // instrumentation scope -- and therefore every metric stream's identity -- change on every commit,
+        // rather than only on every package release. The scope version must track the package version only.
+        int plus = raw.IndexOf('+');
+        return plus < 0 ? raw : raw[..plus];
+    }
 
     internal static readonly ActivitySource ActivitySource = new(Name, Version);
 
@@ -80,4 +92,20 @@ public static class XyoTelemetry
         "xyo.sdk.download.bound_tripped.count",
         unit: "{event}",
         description: "Number of times a download safety bound (byte, entry, timeout, or redirect) tripped.");
+
+    /// <summary>
+    /// Tag key attached to <see cref="DownloadBoundTrippedCount"/> identifying which bound tripped.
+    /// </summary>
+    internal const string BoundTagKey = "xyo.sdk.bound";
+
+    // The seven closed-set values for BoundTagKey. Defined once here, structurally, rather than derived
+    // from any human-readable exception or log message text at the call site: a message can be reworded
+    // for readability without silently reclassifying which bound tripped in a dashboard.
+    internal const string BoundMaxArchiveBytes = "max_archive_bytes";
+    internal const string BoundMaxDecompressedBytes = "max_decompressed_bytes";
+    internal const string BoundMaxEntryBytes = "max_entry_bytes";
+    internal const string BoundMaxTarEntries = "max_tar_entries";
+    internal const string BoundIdleTimeout = "idle_timeout";
+    internal const string BoundTotalDuration = "total_duration";
+    internal const string BoundMaxRedirects = "max_redirects";
 }

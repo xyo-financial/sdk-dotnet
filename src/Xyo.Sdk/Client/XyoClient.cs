@@ -397,7 +397,6 @@ public sealed class XyoClient : IXyoClient
         long startTimestamp = Stopwatch.GetTimestamp();
         string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : state.Config.Traceparent;
         using Activity? activity = StartClientActivity(operationName, effectiveTraceparent);
-        string? outboundTraceparent = activity?.Id;
 
         try
         {
@@ -413,7 +412,7 @@ public sealed class XyoClient : IXyoClient
             activity?.SetTag("http.request.method", "POST");
             activity?.SetTag("server.address", httpRequest.RequestUri!.Host);
 
-            ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent, outboundTraceparent: outboundTraceparent);
+            ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent, activity: activity);
 
             httpRequest.Content = JsonContent.Create(effectiveRequest, options: DefaultJsonOptions);
 
@@ -476,7 +475,6 @@ public sealed class XyoClient : IXyoClient
         long startTimestamp = Stopwatch.GetTimestamp();
         string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : state.Config.Traceparent;
         using Activity? activity = StartClientActivity(operationName, effectiveTraceparent);
-        string? outboundTraceparent = activity?.Id;
 
         try
         {
@@ -528,7 +526,7 @@ public sealed class XyoClient : IXyoClient
             activity?.SetTag("http.request.method", "POST");
             activity?.SetTag("server.address", httpRequest.RequestUri!.Host);
 
-            ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent, outboundTraceparent: outboundTraceparent);
+            ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent, activity: activity);
 
             httpRequest.Content = JsonContent.Create(effective, options: DefaultJsonOptions);
 
@@ -591,7 +589,6 @@ public sealed class XyoClient : IXyoClient
         long startTimestamp = Stopwatch.GetTimestamp();
         string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : state.Config.Traceparent;
         using Activity? activity = StartClientActivity(operationName, effectiveTraceparent);
-        string? outboundTraceparent = activity?.Id;
 
         try
         {
@@ -617,7 +614,7 @@ public sealed class XyoClient : IXyoClient
             activity?.SetTag("http.request.method", "GET");
             activity?.SetTag("server.address", statusUri.Host);
 
-            ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent, outboundTraceparent: outboundTraceparent);
+            ApplyDefaultHeaders(httpRequest, state.Config, correlationId, traceparent, activity: activity);
 
             using var response = await SendRequestAsync(httpRequest, HttpCompletionOption.ResponseContentRead, state.Config, cancellationToken).ConfigureAwait(false);
             activity?.SetTag("http.response.status_code", XyoTelemetry.GetBoxedStatusCode(response.StatusCode));
@@ -692,34 +689,53 @@ public sealed class XyoClient : IXyoClient
         using Activity? activity = StartClientActivity(operationName, state.Config.Traceparent);
         var statistics = new ArchiveTransferStatistics();
         var progress = new StreamProgress();
+        Exception? failure = null;
+        bool completed = false;
 
-        await using var enumerator = StreamEnrichmentCollectionCoreAsync(downloadUrl, state, activity, statistics, progress, cancellationToken)
-            .GetAsyncEnumerator(cancellationToken);
-
-        while (true)
+        try
         {
-            EnrichmentResponse current;
-            try
+            await using var enumerator = StreamEnrichmentCollectionCoreAsync(downloadUrl, state, activity, statistics, progress, cancellationToken)
+                .GetAsyncEnumerator(cancellationToken);
+
+            while (true)
             {
-                if (!await enumerator.MoveNextAsync().ConfigureAwait(false))
+                EnrichmentResponse current;
+                try
                 {
-                    break;
+                    if (!await enumerator.MoveNextAsync().ConfigureAwait(false))
+                    {
+                        break;
+                    }
+                    current = enumerator.Current;
                 }
-                current = enumerator.Current;
-            }
-            catch (Exception ex)
-            {
-                CompleteStreamActivity(activity, ex, progress, statistics);
-                RecordRequestMetrics(operationName, startTimestamp, ex);
-                LogOperationFailure(operationName, ex);
-                throw;
+                catch (Exception ex)
+                {
+                    failure = ex;
+                    throw;
+                }
+
+                yield return current;
             }
 
-            yield return current;
+            completed = true;
         }
-
-        CompleteStreamActivity(activity, exception: null, progress, statistics);
-        RecordRequestMetrics(operationName, startTimestamp, exception: null);
+        finally
+        {
+            // `completed == false` with `failure == null` means the consumer abandoned the enumeration
+            // (break, .Take(n), .FirstOrDefaultAsync(), an exception in the consumer's own loop body): the
+            // compiler-generated DisposeAsync unwinds the `await using` above without ever reaching the end
+            // of the `try`. That is a real, distinct outcome, not a missing measurement -- a request counter
+            // that skips a whole class of completions makes every dashboard built on it under-count exactly
+            // the traffic pattern a streaming API invites, and the span would otherwise be left `Unset`
+            // rather than classified either way.
+            bool abandoned = !completed && failure is null;
+            CompleteStreamActivity(activity, failure, progress, statistics, abandoned);
+            RecordRequestMetrics(operationName, startTimestamp, failure, outcomeOverride: abandoned ? "abandoned" : null);
+            if (failure is not null)
+            {
+                LogOperationFailure(operationName, failure);
+            }
+        }
     }
 
     private async IAsyncEnumerable<EnrichmentResponse> StreamEnrichmentCollectionCoreAsync(
@@ -732,7 +748,6 @@ public sealed class XyoClient : IXyoClient
     {
         Uri validatedUri = state.SecurityPolicy.ValidateDownloadUrl(downloadUrl);
         HttpResponseMessage? response = null;
-        string? outboundTraceparent = activity?.Id;
 
         activity?.SetTag("http.request.method", "GET");
         activity?.SetTag("server.address", validatedUri.Host);
@@ -766,7 +781,7 @@ public sealed class XyoClient : IXyoClient
                     httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 }
 
-                ApplyDefaultHeaders(httpRequest, state.Config, includeInternalOnlyHeaders: !isExternalStorage, outboundTraceparent: outboundTraceparent);
+                ApplyDefaultHeaders(httpRequest, state.Config, includeInternalOnlyHeaders: !isExternalStorage, activity: activity);
 
                 try
                 {
@@ -803,7 +818,7 @@ public sealed class XyoClient : IXyoClient
                 {
                     if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
                     {
-                        XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.bound", "max_redirects"));
+                        XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>(XyoTelemetry.BoundTagKey, XyoTelemetry.BoundMaxRedirects));
                     }
                     throw new XyoClientException(System.Net.HttpStatusCode.BadRequest,
                         $"Archive download exceeded the maximum of {MaxDownloadRedirects} redirects.");
@@ -895,21 +910,18 @@ public sealed class XyoClient : IXyoClient
     /// <param name="correlationId">Per-call correlation ID override; falls back to the configured default.</param>
     /// <param name="traceparent">Per-call traceparent override; falls back to the configured default.</param>
     /// <param name="includeInternalOnlyHeaders">
-    /// Whether to attach X-Correlation-ID, traceparent, and DefaultHeaders. False when the request targets
-    /// an external archive storage host (see <see cref="DownloadSecurityPolicy.IsExternalStorageHost"/>):
-    /// distributed-tracing headers carry live trace/span IDs and DefaultHeaders may carry caller secrets
-    /// (e.g. an internal API key), neither of which should follow the request to a third party any more
-    /// than the Bearer token does.
+    /// Whether to attach X-Correlation-ID, traceparent, tracestate, and DefaultHeaders. False when the
+    /// request targets an external archive storage host (see
+    /// <see cref="DownloadSecurityPolicy.IsExternalStorageHost"/>): distributed-tracing headers carry live
+    /// trace/span IDs and DefaultHeaders may carry caller secrets (e.g. an internal API key), neither of
+    /// which should follow the request to a third party any more than the Bearer token does.
     /// </param>
-    /// <param name="outboundTraceparent">
-    /// The traceparent value actually placed on the wire when an effective traceparent (from
-    /// <paramref name="traceparent"/> or <see cref="XyoClientConfig.Traceparent"/>) is present. When an
-    /// <see cref="Activity"/> was started for this call, this is that activity's own W3C-formatted
-    /// <see cref="Activity.Id"/>, so the outbound request carries the SDK's own child span rather than
-    /// forwarding the caller-supplied parent id verbatim. Falls back to the effective traceparent unchanged
-    /// when null or blank (e.g. no <see cref="ActivityListener"/> is observing this source).
+    /// <param name="activity">
+    /// The <see cref="Activity"/> started for this call, if any (see <see cref="StartClientActivity"/>).
+    /// Used to resolve the outbound traceparent -- see <see cref="ResolveOutboundTraceparent"/> -- and to
+    /// forward <see cref="Activity.TraceStateString"/> as <c>tracestate</c> when present.
     /// </param>
-    private static void ApplyDefaultHeaders(HttpRequestMessage request, XyoClientConfig config, string? correlationId = null, string? traceparent = null, bool includeInternalOnlyHeaders = true, string? outboundTraceparent = null)
+    private static void ApplyDefaultHeaders(HttpRequestMessage request, XyoClientConfig config, string? correlationId = null, string? traceparent = null, bool includeInternalOnlyHeaders = true, Activity? activity = null)
     {
         if (!includeInternalOnlyHeaders)
         {
@@ -926,20 +938,20 @@ public sealed class XyoClient : IXyoClient
             }
         }
 
-        string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : config.Traceparent;
-        if (!string.IsNullOrWhiteSpace(effectiveTraceparent))
+        string? headerValue = ResolveOutboundTraceparent(activity, traceparent, config);
+        if (headerValue is not null && !request.Headers.NonValidated.Contains("traceparent"))
         {
-            ValidateHeaderValue(effectiveTraceparent, nameof(traceparent));
-            if (!TraceparentRegex.IsMatch(effectiveTraceparent))
-            {
-                throw new ArgumentException(
-                    "Header 'traceparent' does not conform to the W3C TraceContext format (version-traceid-parentid-flags).", nameof(traceparent));
-            }
-            if (!request.Headers.NonValidated.Contains("traceparent"))
-            {
-                string headerValue = !string.IsNullOrWhiteSpace(outboundTraceparent) ? outboundTraceparent : effectiveTraceparent;
-                request.Headers.TryAddWithoutValidation("traceparent", headerValue);
-            }
+            request.Headers.TryAddWithoutValidation("traceparent", headerValue);
+        }
+
+        // tracestate carries vendor-specific sampling/state decisions alongside traceparent; only ever
+        // sourced from the SDK's own started activity, never from a raw caller-supplied string, so there is
+        // no separate format to validate here beyond the shared CRLF check.
+        string? tracestate = activity?.TraceStateString;
+        if (!string.IsNullOrWhiteSpace(tracestate) && !request.Headers.NonValidated.Contains("tracestate"))
+        {
+            ValidateHeaderValue(tracestate, "tracestate");
+            request.Headers.TryAddWithoutValidation("tracestate", tracestate);
         }
 
         foreach (var (key, value) in config.DefaultHeaders)
@@ -949,6 +961,47 @@ public sealed class XyoClient : IXyoClient
                 request.Headers.TryAddWithoutValidation(key, value);
             }
         }
+    }
+
+    /// <summary>
+    /// Resolves the traceparent value actually placed on the wire.
+    /// </summary>
+    /// <remarks>
+    /// Any caller-supplied or configured traceparent is always validated (CRLF and W3C format) when
+    /// present, regardless of whether it ends up being what is sent. The value actually returned then
+    /// prefers the SDK's own client span, whenever <paramref name="activity"/> was started and produced a
+    /// W3C-formatted id, <b>regardless of whether the caller supplied a raw traceparent string</b>. This is
+    /// what makes propagation work for the primary OpenTelemetry use case: an application that has already
+    /// adopted OpenTelemetry (e.g. ASP.NET Core instrumentation) sets <see cref="Activity.Current"/> and
+    /// never passes a raw header, so gating header emission on a caller-supplied value alone would silently
+    /// drop the trace at the process boundary. Falls back to the validated caller-supplied or configured
+    /// traceparent only when no activity exists (e.g. no <see cref="ActivityListener"/> is observing
+    /// <see cref="XyoTelemetry.ActivitySource"/>). Never emits a non-W3C value: under a legacy
+    /// <see cref="ActivityIdFormat.Hierarchical"/> configuration, <see cref="Activity.Id"/> is not a valid
+    /// traceparent, so that case falls through to the validated fallback instead of being sent verbatim.
+    /// </remarks>
+    private static string? ResolveOutboundTraceparent(Activity? activity, string? traceparent, XyoClientConfig config)
+    {
+        string? effectiveTraceparent = !string.IsNullOrWhiteSpace(traceparent) ? traceparent : config.Traceparent;
+        if (!string.IsNullOrWhiteSpace(effectiveTraceparent))
+        {
+            // Validated unconditionally, even when the SDK's own activity id (below) turns out to be what is
+            // actually sent: a malformed caller-supplied or configured traceparent is a caller error and must
+            // surface as one, not be silently swallowed just because a span happened to be active.
+            ValidateHeaderValue(effectiveTraceparent, nameof(traceparent));
+            if (!TraceparentRegex.IsMatch(effectiveTraceparent))
+            {
+                throw new ArgumentException(
+                    "Header 'traceparent' does not conform to the W3C TraceContext format (version-traceid-parentid-flags).", nameof(traceparent));
+            }
+        }
+
+        if (activity is { IdFormat: ActivityIdFormat.W3C, Id: { } activityId })
+        {
+            return activityId;
+        }
+
+        return string.IsNullOrWhiteSpace(effectiveTraceparent) ? null : effectiveTraceparent;
     }
 
     private const int MaxUnaryResponseChars = 1_048_576; // 1 MiB, ~8x the largest plausible batch receipt
@@ -1297,10 +1350,20 @@ public sealed class XyoClient : IXyoClient
     /// <summary>
     /// Sets the final <see cref="ActivityStatusCode"/> on a client span from the typed exception hierarchy, so
     /// a <see cref="RateLimitException"/> is distinguishable from a <see cref="XyoNetworkException"/> in the
-    /// trace backend. <paramref name="exception"/>'s message is the only exception detail placed on the span,
-    /// and every message the SDK constructs is already free of credentials (see
-    /// <see cref="XyoClientConfig.ToString"/> and <see cref="LogSafeText"/>).
+    /// trace backend.
     /// </summary>
+    /// <remarks>
+    /// The status description is <see cref="ClassifyOutcome"/>'s low-cardinality, SDK-authored outcome
+    /// string, deliberately <b>not</b> <c><paramref name="exception"/>.Message</c>. That message embeds a
+    /// prefix of the raw server response body (<c>SafeSummary</c>), the RFC 7807 <c>detail</c> string, and
+    /// (for status-lookup failures) the enrichment job id from the request URI -- any of which can carry
+    /// transaction data or, from a gateway that echoes request headers into an error body, the bearer token
+    /// itself. Running that text through <see cref="LogSafeText.Summarize"/> defeats log forgery but does
+    /// not redact its contents, so it is not sufficient here: a trace backend is a wider audience and a
+    /// longer retention window than an application log. Full fidelity stays available to a caller who opts
+    /// in, via <c>RawResponseBody</c> on the SDK's exception types and <see cref="Exception.Message"/> itself
+    /// -- neither is truncated or altered, only kept off the span.
+    /// </remarks>
     private static void CompleteActivityStatus(Activity? activity, Exception? exception)
     {
         if (activity is null)
@@ -1314,7 +1377,7 @@ public sealed class XyoClient : IXyoClient
             return;
         }
 
-        activity.SetStatus(ActivityStatusCode.Error, LogSafeText.Summarize(exception.Message));
+        activity.SetStatus(ActivityStatusCode.Error, ClassifyOutcome(exception));
         activity.SetTag("error.type", exception.GetType().FullName);
 
         if (exception is RateLimitException { RetryAfter: { } retryAfterSeconds })
@@ -1329,7 +1392,17 @@ public sealed class XyoClient : IXyoClient
     /// bytes transferred before the failure -- see <see cref="StreamProgress"/> and
     /// <see cref="ArchiveTransferStatistics"/>.
     /// </summary>
-    private static void CompleteStreamActivity(Activity? activity, Exception? exception, StreamProgress progress, ArchiveTransferStatistics statistics)
+    /// <param name="activity">The client span for this call, or <c>null</c> when nobody is listening.</param>
+    /// <param name="exception">The failure that ended the stream, or <c>null</c> on a successful drain.</param>
+    /// <param name="progress">Redirect hop count and, once connected, the idle-timeout stream wrapper.</param>
+    /// <param name="statistics">Archive entry count and inflated byte progress.</param>
+    /// <param name="abandoned">
+    /// True when the consumer stopped enumerating without the archive fully draining and without an
+    /// exception (<c>break</c>, <c>.Take(n)</c>, <c>.FirstOrDefaultAsync()</c>). The span status is still
+    /// completed as <see cref="ActivityStatusCode.Ok"/> (nothing failed), but tagged separately so an
+    /// operator can distinguish "the consumer chose to stop early" from "the archive was fully consumed".
+    /// </param>
+    private static void CompleteStreamActivity(Activity? activity, Exception? exception, StreamProgress progress, ArchiveTransferStatistics statistics, bool abandoned = false)
     {
         if (activity is not null)
         {
@@ -1339,6 +1412,10 @@ public sealed class XyoClient : IXyoClient
             if (progress.IdleStream is not null)
             {
                 activity.SetTag("xyo.sdk.download.bytes_transferred", progress.IdleStream.TotalBytesRead);
+            }
+            if (abandoned)
+            {
+                activity.SetTag("xyo.sdk.stream.abandoned", true);
             }
         }
 
@@ -1351,9 +1428,18 @@ public sealed class XyoClient : IXyoClient
     /// the instrument's <c>Enabled</c> property, so nothing here allocates a tag list when no
     /// <c>MeterListener</c> is observing <see cref="XyoTelemetry.Meter"/>.
     /// </summary>
-    private static void RecordRequestMetrics(string operationName, long startTimestamp, Exception? exception)
+    /// <param name="operationName">The public operation this call belongs to, e.g. <c>EnrichTransaction</c>.</param>
+    /// <param name="startTimestamp">A <see cref="Stopwatch.GetTimestamp"/> value captured when the call began.</param>
+    /// <param name="exception">The failure that ended the call, or <c>null</c> on success.</param>
+    /// <param name="outcomeOverride">
+    /// When set, used as the <c>xyo.sdk.outcome</c> tag value instead of <see cref="ClassifyOutcome"/>'s
+    /// mapping of <paramref name="exception"/>. Used for the abandoned-stream outcome (see
+    /// <see cref="StreamEnrichmentCollectionAsync"/>), which is neither a success nor any exception-derived
+    /// failure and so has no <see cref="Exception"/> to classify from.
+    /// </param>
+    private static void RecordRequestMetrics(string operationName, long startTimestamp, Exception? exception, string? outcomeOverride = null)
     {
-        string outcome = ClassifyOutcome(exception);
+        string outcome = outcomeOverride ?? ClassifyOutcome(exception);
 
         if (XyoTelemetry.RequestCount.Enabled || XyoTelemetry.RequestDuration.Enabled)
         {
@@ -1381,9 +1467,11 @@ public sealed class XyoClient : IXyoClient
     }
 
     /// <summary>
-    /// Logs an operation failure through the optional <see cref="XyoClientConfig.LoggerFactory"/> (a
-    /// no-op <c>NullLogger</c> by default). Only the operation name, exception type, and exception message
-    /// reach the log record; none of those ever contain the API key or the raw Authorization header.
+    /// Logs an operation failure through <see cref="_logger"/>, currently always a no-op <c>NullLogger</c>
+    /// (see the comment on this type's constructor: the SDK-owned logger source was dropped in favour of
+    /// PR #36's <c>ILogger&lt;XyoClient&gt;</c> DI injection, pending this branch's rebase onto it). Only the
+    /// operation name, exception type, and exception message reach the log record; none of those ever
+    /// contain the API key or the raw Authorization header.
     /// </summary>
     private void LogOperationFailure(string operationName, Exception exception)
     {
@@ -1547,7 +1635,7 @@ public sealed class XyoClient : IXyoClient
             {
                 if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
                 {
-                    XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.bound", "idle_timeout"));
+                    XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>(XyoTelemetry.BoundTagKey, XyoTelemetry.BoundIdleTimeout));
                 }
                 throw new XyoNetworkException(
                     $"Archive download read stalled: the peer did not produce further data within " +
@@ -1567,7 +1655,7 @@ public sealed class XyoClient : IXyoClient
             {
                 if (XyoTelemetry.DownloadBoundTrippedCount.Enabled)
                 {
-                    XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>("xyo.sdk.bound", "total_duration"));
+                    XyoTelemetry.DownloadBoundTrippedCount.Add(1, new KeyValuePair<string, object?>(XyoTelemetry.BoundTagKey, XyoTelemetry.BoundTotalDuration));
                 }
                 throw new XyoNetworkException(
                     $"Archive download exceeded the maximum total network transfer time of " +
