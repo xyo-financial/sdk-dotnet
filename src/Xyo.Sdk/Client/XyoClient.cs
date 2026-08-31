@@ -14,6 +14,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Xyo.Generated.Api;
 using Xyo.Generated.Client;
@@ -86,7 +87,15 @@ public sealed class XyoClient : IXyoClient
 
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
-    private readonly ILogger<XyoClient>? _logger;
+
+    // Built exactly once, in the constructor, from the XyoClientConfig supplied at construction time -- never
+    // re-read from _state afterwards. If this were instead derived from the (reloadable) current state, a
+    // config reload could swap out the very logger used to report that reload, and a *rejected* reload would
+    // end up reporting through a logger built from the (rejected) candidate configuration rather than the one
+    // still actually in effect. That staleness is deliberate. Never null: XyoClientConfig.LoggerFactory
+    // defaults to NullLoggerFactory.Instance, so this is always a usable (possibly no-op) logger.
+    private readonly ILogger<XyoClient> _logger;
+
     private readonly IDisposable? _optionsChangeSubscription;
 
     // Reference reassignment of a `volatile` field is atomic and immediately visible across threads, so a
@@ -140,6 +149,7 @@ public sealed class XyoClient : IXyoClient
         XyoClientConfig.ValidateEffectiveBaseUrl(config.BaseUrl, "XyoClientConfig.BaseUrl", nameof(config));
 
         _state = new ConfigState(config);
+        _logger = config.LoggerFactory.CreateLogger<XyoClient>();
 
         if (httpClient != null)
         {
@@ -186,56 +196,150 @@ public sealed class XyoClient : IXyoClient
     /// <para>
     /// A reload that fails <see cref="XyoClientOptions.ToConfig"/> validation (e.g. an invalid
     /// <c>BaseUrl</c>) is rejected in <see cref="OnOptionsChanged"/>: the client keeps serving requests
-    /// against its last valid configuration, and the failure is logged via <paramref name="logger"/> rather
-    /// than swallowed or allowed to fault the change-notification thread.
+    /// against its last valid configuration, and the failure is logged via the <see cref="ILogger"/> built
+    /// once at construction time (see <see cref="_logger"/>) rather than swallowed or allowed to fault the
+    /// change-notification thread.
     /// </para>
     /// </remarks>
-    internal XyoClient(IOptionsMonitor<XyoClientOptions> optionsMonitor, HttpClient httpClient, ILogger<XyoClient>? logger = null)
-        : this((optionsMonitor ?? throw new ArgumentNullException(nameof(optionsMonitor))).CurrentValue.ToConfig(), httpClient)
+    internal XyoClient(IOptionsMonitor<XyoClientOptions> optionsMonitor, HttpClient httpClient, ILoggerFactory? containerLoggerFactory = null)
+        : this(
+            BuildInitialConfig(optionsMonitor ?? throw new ArgumentNullException(nameof(optionsMonitor)), containerLoggerFactory),
+            RequireHttpClient(httpClient))
     {
-        _logger = logger;
+        // optionsMonitor.CurrentValue is Get(Options.DefaultName): the client's identity is "the default
+        // XyoClientOptions instance", and OnOptionsChanged filters every notification against that same
+        // name -- see its remarks.
         _optionsChangeSubscription = optionsMonitor.OnChange(OnOptionsChanged);
     }
+
+    /// <summary>
+    /// Builds the <see cref="XyoClientConfig"/> the internal constructor seeds <see cref="_state"/> from,
+    /// applying the DI container's <see cref="ILoggerFactory"/> as a fallback when the caller has not
+    /// explicitly configured one on <see cref="XyoClientOptions"/> (see
+    /// <see cref="XyoClientConfig.IsLoggerFactoryExplicit"/>). A caller who set
+    /// <see cref="NullLoggerFactory.Instance"/> explicitly, to silence the SDK, is respected: the container's
+    /// factory is applied only when nothing was set at all.
+    /// </summary>
+    private static XyoClientConfig BuildInitialConfig(IOptionsMonitor<XyoClientOptions> optionsMonitor, ILoggerFactory? containerLoggerFactory)
+    {
+        XyoClientConfig config = optionsMonitor.CurrentValue.ToConfig();
+        if (!config.IsLoggerFactoryExplicit && containerLoggerFactory != null)
+        {
+            config = config with { LoggerFactory = containerLoggerFactory };
+        }
+        return config;
+    }
+
+    /// <summary>
+    /// Guards the internal constructor's <c>httpClient</c> parameter, which forwards straight into the
+    /// public constructor's <c>httpClient != null</c> branch. A null slipping through would silently flip
+    /// <c>_ownsHttpClient</c> to <c>true</c> and construct a second, SDK-owned <see cref="HttpClient"/>,
+    /// defeating the entire purpose of this constructor: reusing the caller's
+    /// <see cref="System.Net.Http.IHttpClientFactory"/>-managed client.
+    /// </summary>
+    private static HttpClient RequireHttpClient(HttpClient httpClient) =>
+        httpClient ?? throw new ArgumentNullException(nameof(httpClient));
 
     /// <summary>
     /// Applies (or rejects) a live <see cref="XyoClientOptions"/> reload reported by
     /// <see cref="IOptionsMonitor{TOptions}.OnChange(Action{TOptions,string})"/>.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <see cref="IOptionsMonitor{TOptions}.OnChange"/> fires for <b>every</b> named <c>XyoClientOptions</c>
+    /// instance registered anywhere in the container, not only the default-named one this client was seeded
+    /// from (<c>optionsMonitor.CurrentValue</c>, i.e. <c>Get(Options.DefaultName)</c>). A notification for any
+    /// other name is therefore ignored below: adopting it would silently swap this client's <c>BaseUrl</c>
+    /// and Bearer token for an unrelated profile's the moment an application registers a second, differently
+    /// named section (a sandbox profile, a second tenant, a health-check probe) that happens to reload first
+    /// (US-DOTNET-004).
+    /// </para>
+    /// <para>
     /// Runs on whatever thread the options change-token infrastructure invokes it on (typically a thread
     /// pool thread reacting to a file-system watcher), so an unhandled exception here would fault that
     /// thread rather than any caller of the SDK. Every exception is therefore caught: a validation failure
-    /// (<see cref="ArgumentException"/> from <see cref="XyoClientOptions.ToConfig"/>) is the expected,
-    /// documented outcome of a bad edit to <c>appsettings.json</c> and is logged at
-    /// <see cref="LogLevel.Error"/>; anything else is logged at the same level as a defensive backstop. In
-    /// both cases <see cref="_state"/> is left untouched, so in-flight and subsequent calls keep using the
-    /// last configuration that validated successfully.
+    /// (<see cref="ArgumentException"/> from <see cref="XyoClientOptions.ToConfig"/>, or the missing-credential
+    /// guard below) is the expected, documented outcome of a bad edit to <c>appsettings.json</c> and is
+    /// logged at <see cref="LogLevel.Error"/>; anything else is logged at the same level as a defensive
+    /// backstop. In both cases <see cref="_state"/> is left untouched, so in-flight and subsequent calls keep
+    /// using the last configuration that validated successfully.
+    /// </para>
     /// </remarks>
     private void OnOptionsChanged(XyoClientOptions options, string? name)
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            // Raced Dispose(): ChangeTokenRegistration.Dispose() unregisters but does not synchronise with a
+            // callback already in flight. This client will never serve another request with this state, so
+            // there is nothing useful left to do with a notification that arrives after disposal.
+            return;
+        }
+
+        // A null name is IOptionsMonitor's own normalisation of the default name to Options.DefaultName
+        // (string.Empty), so both must be treated as "the default instance" here.
+        if (!string.Equals(name ?? Options.DefaultName, Options.DefaultName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
         XyoClientConfig newConfig;
         try
         {
             newConfig = options.ToConfig();
+
+            // A reload is only ever supposed to be an improvement on a configuration that already worked.
+            // ToConfig() validates BaseUrl and DefaultHeaders but has no way to know this is a *reload*
+            // rather than a first-time construction, where deferring the credential (e.g. to be supplied
+            // later via ApiKeySupplier) is legitimate. On the reload path it is not: accepting a config that
+            // has lost its credential would take a healthy singleton to 100% failure with no way back short
+            // of a restart, contradicting the "last valid configuration" guarantee this handler exists to
+            // provide. So it is rejected here, on the same terms as an invalid BaseUrl.
+            if (string.IsNullOrWhiteSpace(newConfig.ApiKey) && newConfig.ApiKeySupplier is null)
+            {
+                throw new ArgumentException(
+                    "Reloaded XyoClientOptions supplies neither ApiKey nor ApiKeySupplier; the reload was "
+                    + "rejected rather than leaving the client unable to authenticate.",
+                    nameof(XyoClientOptions.ApiKey));
+            }
+
+            _state = new ConfigState(newConfig);
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex,
-                "XyoClientOptions reload was rejected: {Message}. XyoClient continues serving requests with its last valid configuration.",
-                ex.Message);
-            OptionsReloadFailed?.Invoke(this, ex);
+            // ex.Message can carry operator-controlled text verbatim (e.g. a candidate BaseUrl, which may
+            // itself have carried a credential before XyoClientConfig.NormalizeBaseUrl redacted that specific
+            // case) as well as embedded control characters from a malformed appsettings.json value.
+            // LogSafeText.Summarize flattens CR/LF and other log-line-forgery characters (CWE-117) and clamps
+            // the length before this reaches the logging pipeline; the full exception is still attached via
+            // the `ex` argument for a sink that can handle it safely.
+            _logger.LogError(ex,
+                "XyoClientOptions reload was rejected: {Reason}. XyoClient continues serving requests with its last valid configuration.",
+                LogSafeText.Summarize(ex.Message));
+
+            try
+            {
+                OptionsReloadFailed?.Invoke(this, ex);
+            }
+            catch (Exception handlerEx)
+            {
+                // A subscriber's exception must not propagate out of this handler: it would fault the
+                // options change-token infrastructure's thread, the exact failure mode this whole method
+                // exists to prevent for the reload itself.
+                _logger.LogError(handlerEx, "An OptionsReloadFailed handler threw; ignored.");
+            }
             return;
         }
 
-        _state = new ConfigState(newConfig);
-        _logger?.LogInformation("XyoClientOptions reload applied; XyoClient is now using the updated configuration.");
+        _logger.LogInformation(
+            "XyoClientOptions reload applied: BaseUrl={BaseUrl}, TrustedDownloadHosts={TrustedHostCount}, Timeout={TimeoutSeconds}s, DownloadTimeout={DownloadTimeoutSeconds}s.",
+            newConfig.BaseUrl, newConfig.TrustedDownloadHosts.Count, newConfig.Timeout.TotalSeconds, newConfig.DownloadTimeout.TotalSeconds);
     }
 
     /// <summary>
     /// Raised when an <see cref="IOptionsMonitor{TOptions}"/> reload is rejected by validation. Not part of
-    /// the public API surface: production observability goes through the <see cref="ILogger"/> passed to the
-    /// internal constructor, and this event exists solely so tests can assert deterministically that a
-    /// rejected reload is surfaced rather than silently swallowed.
+    /// the public API surface: production observability goes through the <see cref="ILogger"/> built once at
+    /// construction time (see <see cref="_logger"/>), and this event exists solely so tests can assert
+    /// deterministically that a rejected reload is surfaced rather than silently swallowed.
     /// </summary>
     internal event EventHandler<Exception>? OptionsReloadFailed;
 

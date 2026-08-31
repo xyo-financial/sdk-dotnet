@@ -106,7 +106,12 @@ public class ConfigurationReloadTests
             {
             }
         });
-        Assert.Contains("Archive download timed out after 0.05 seconds", ex.Message);
+
+        // Asserted on the exception type plus the configured timeout value rather than the exact sentence:
+        // PR #35 splits this single message into separate connect-phase and read-stall wording, and pinning
+        // the literal string here would make this test a rebase hazard rather than a regression guard.
+        Assert.Contains("0.05", ex.Message);
+        Assert.Contains("second", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -203,5 +208,66 @@ public class ConfigurationReloadTests
 
         await sameClient.EnrichTransactionAsync("Uber", "GB");
         Assert.StartsWith("https://sandbox.xyo.financial", handler.CapturedRequests[1].RequestUri!.ToString());
+    }
+
+    [Fact]
+    public async Task OptionsReload_ChangeToADifferentlyNamedXyoClientOptions_DoesNotReconfigureTheDefaultClient()
+    {
+        // Regression test for US-DOTNET-004 / C1: IOptionsMonitor<T>.OnChange fires for every named T
+        // registered in the container, not only the default-named instance a client was constructed from.
+        // TestOptionsMonitor cannot exercise this at all (it always reports a null name -- see its remarks),
+        // so this test drives the real Microsoft.Extensions.Options infrastructure via a manually registered,
+        // independently triggerable IOptionsChangeTokenSource<XyoClientOptions> named "Other".
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK,
+            @"{ ""merchant"": ""M"", ""description"": ""D"", ""categories"": [""General""], ""logo"": ""https://cdn.xyo.financial/logo.png"", ""location"": ""London, UK"", ""address"": ""1 High St"" }");
+
+        var services = new ServiceCollection();
+        services.Configure<XyoClientOptions>(o =>
+        {
+            o.ApiKey = "default_key";
+            o.BaseUrl = "https://api.xyo.financial";
+        });
+        services.Configure<XyoClientOptions>("Other", o =>
+        {
+            o.ApiKey = "other_key";
+            o.BaseUrl = "https://sandbox.xyo.financial";
+        });
+
+        var otherSource = new TriggerableChangeTokenSource<XyoClientOptions>("Other");
+        services.AddSingleton<IOptionsChangeTokenSource<XyoClientOptions>>(otherSource);
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var optionsMonitor = serviceProvider.GetRequiredService<IOptionsMonitor<XyoClientOptions>>();
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(optionsMonitor, httpClient);
+
+        await client.EnrichTransactionAsync("Uber", "GB");
+        Assert.StartsWith("https://api.xyo.financial", handler.CapturedRequests[0].RequestUri!.ToString());
+        Assert.Equal("default_key", handler.CapturedRequests[0].Headers.Authorization?.Parameter);
+
+        // Fires the change token belonging only to the "Other" named XyoClientOptions instance. Before the
+        // fix, XyoClient.OnOptionsChanged adopted this unconditionally: the default-named client ended up
+        // sending "other_key" to sandbox.xyo.financial, credential misrouting reproduced against the live PR.
+        otherSource.Trigger();
+
+        await client.EnrichTransactionAsync("Uber", "GB");
+        Assert.StartsWith("https://api.xyo.financial", handler.CapturedRequests[1].RequestUri!.ToString());
+        Assert.Equal("default_key", handler.CapturedRequests[1].Headers.Authorization?.Parameter);
+    }
+
+    [Fact]
+    public void Dispose_UnsubscribesFromTheOptionsMonitor()
+    {
+        var handler = new MockHttpMessageHandler(HttpStatusCode.OK, "{}");
+        using var httpClient = new HttpClient(handler);
+        var monitor = new TestOptionsMonitor<XyoClientOptions>(new XyoClientOptions { ApiKey = "xyo_test_key" });
+
+        var client = new XyoClient(monitor, httpClient);
+        Assert.Equal(1, monitor.ListenerCount);
+
+        client.Dispose();
+
+        Assert.Equal(0, monitor.ListenerCount);
     }
 }

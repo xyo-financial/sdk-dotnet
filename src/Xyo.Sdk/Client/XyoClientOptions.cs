@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace Xyo.Sdk.Client;
 
@@ -167,6 +168,16 @@ public sealed class XyoClientOptions
         _readIdleTimeout ?? _downloadTimeout ?? XyoClientConfig.DefaultReadIdleTimeout;
 
     /// <summary>
+    /// Gets or sets the logger factory <see cref="XyoClient"/> builds its single <see
+    /// cref="ILogger{TCategoryName}"/> from at construction time. Left unset, the DI registration
+    /// (<see cref="Extensions.ServiceCollectionExtensions.AddXyoClient(Microsoft.Extensions.DependencyInjection.IServiceCollection,Action{XyoClientOptions})"/>)
+    /// wires in the container's own <see cref="ILoggerFactory"/> instead; set it explicitly here (including
+    /// to <see cref="Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance"/>, to deliberately
+    /// silence the SDK) to override that. See <see cref="XyoClientConfig.LoggerFactory"/>.
+    /// </summary>
+    public ILoggerFactory? LoggerFactory { get; set; }
+
+    /// <summary>
     /// Converts this options instance to an immutable <see cref="XyoClientConfig"/>.
     /// </summary>
     /// <remarks>
@@ -209,7 +220,8 @@ public sealed class XyoClientOptions
             MaxEntryBytes = MaxEntryBytes,
             MaxTarEntries = MaxTarEntries,
             TrustedDownloadHosts = TrustedDownloadHosts,
-            DefaultHeaders = DefaultHeaders
+            DefaultHeaders = DefaultHeaders,
+            LoggerFactory = LoggerFactory
         };
     }
 

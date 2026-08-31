@@ -67,9 +67,21 @@ public static class ServiceCollectionExtensions
     /// swallowed or allowed to crash the process. See <see cref="XyoClient"/>'s internal
     /// <c>OnOptionsChanged</c> handler for the full behaviour this decision relies on.
     /// </para>
+    /// <para>
+    /// <b><paramref name="configureOptions"/> is re-executed on every reload</b>, not just once at startup:
+    /// it is registered as an <c>IConfigureOptions&lt;XyoClientOptions&gt;</c>, which
+    /// <see cref="IOptionsMonitor{TOptions}"/> re-runs each time it rebuilds the effective options for a
+    /// change notification, on whatever thread that notification arrives on (typically a thread pool thread
+    /// reacting to a file-system watcher). Under the previous one-shot <see cref="IOptions{TOptions}"/>
+    /// resolution this delegate ran exactly once; a delegate that reads a secret from a vault, increments a
+    /// counter, captures a disposable, or is otherwise not side-effect-free or not thread-safe will now
+    /// behave differently. Keep it side-effect free and thread-safe.
+    /// </para>
     /// </remarks>
     /// <param name="services">The service collection.</param>
-    /// <param name="configureOptions">Delegate to configure client options.</param>
+    /// <param name="configureOptions">
+    /// Delegate to configure client options. Re-executed on every options reload -- see the remarks above.
+    /// </param>
     /// <returns>An <see cref="IHttpClientBuilder"/> that can be used to configure the client handler and resilience policies.</returns>
     public static IHttpClientBuilder AddXyoClient(this IServiceCollection services, Action<XyoClientOptions> configureOptions)
     {
@@ -109,9 +121,14 @@ public static class ServiceCollectionExtensions
             var optionsMonitor = sp.GetRequiredService<IOptionsMonitor<XyoClientOptions>>();
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             var httpClient = httpClientFactory.CreateClient(HttpClientName);
-            var logger = sp.GetService<ILogger<XyoClient>>();
 
-            return new XyoClient(optionsMonitor, httpClient, logger);
+            // Passed through as a fallback only: XyoClient applies it to the effective XyoClientConfig
+            // solely when the caller has not explicitly set XyoClientOptions.LoggerFactory (including
+            // explicitly to NullLoggerFactory.Instance, to opt out) -- see
+            // XyoClientConfig.IsLoggerFactoryExplicit and the internal constructor's remarks.
+            var containerLoggerFactory = sp.GetService<ILoggerFactory>();
+
+            return new XyoClient(optionsMonitor, httpClient, containerLoggerFactory);
         });
 
         return builder;
