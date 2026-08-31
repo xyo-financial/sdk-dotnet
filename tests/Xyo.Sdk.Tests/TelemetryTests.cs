@@ -529,4 +529,96 @@ public class TelemetryTests
             }
         }
     }
+
+    [Fact]
+    public void GetBoxedStatusCode_StandardStatusCodes_ReturnsCachedInstanceWithoutAllocation()
+    {
+        // For all standard HTTP status codes (100..599), GetBoxedStatusCode returns the cached boxed object.
+        for (int code = 100; code <= 599; code++)
+        {
+            object boxed1 = XyoTelemetry.GetBoxedStatusCode(code);
+            object boxed2 = XyoTelemetry.GetBoxedStatusCode(code);
+            Assert.Same(boxed1, boxed2);
+            Assert.Equal(code, (int)boxed1);
+        }
+
+        // HttpStatusCode overload also returns the cached object.
+        Assert.Same(XyoTelemetry.GetBoxedStatusCode(HttpStatusCode.OK), XyoTelemetry.GetBoxedStatusCode(200));
+        Assert.Same(XyoTelemetry.GetBoxedStatusCode(HttpStatusCode.TooManyRequests), XyoTelemetry.GetBoxedStatusCode(429));
+        Assert.Same(XyoTelemetry.GetBoxedStatusCode(HttpStatusCode.InternalServerError), XyoTelemetry.GetBoxedStatusCode(500));
+
+        // Out-of-bounds status codes return the correct value.
+        Assert.Equal(99, (int)XyoTelemetry.GetBoxedStatusCode(99));
+        Assert.Equal(600, (int)XyoTelemetry.GetBoxedStatusCode(600));
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_WithRedirect_EmitsResendCountAndRedirectHopCountTags()
+    {
+        var (listener, activities) = ListenToXyoActivities();
+        using var _l = listener;
+
+        int callCount = 0;
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            callCount++;
+            if (callCount == 1)
+            {
+                var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+                redirect.Headers.Location = new Uri("https://xyo-financial.s3.amazonaws.com/batches/1.tar.gz");
+                return Task.FromResult(redirect);
+            }
+
+            var final = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new MemoryStream(TarGzOfRecords(2)))
+            };
+            return Task.FromResult(final);
+        });
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        int count = 0;
+        await foreach (var item in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz"))
+        {
+            count++;
+        }
+
+        Assert.Equal(2, count);
+        var activity = Assert.Single(activities);
+        Assert.Equal(ActivityStatusCode.Ok, activity.Status);
+        Assert.Equal(1, activity.GetTagItem("xyo.sdk.download.redirect_hop_count"));
+        Assert.Equal(1, activity.GetTagItem("http.request.resend_count"));
+        Assert.Equal(200, activity.GetTagItem("http.response.status_code"));
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_DirectDownload_DoesNotEmitResendCount()
+    {
+        var (listener, activities) = ListenToXyoActivities();
+        using var _l = listener;
+
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new MemoryStream(TarGzOfRecords(1)))
+            };
+            return Task.FromResult(response);
+        });
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new XyoClient(new XyoClientConfig("xyo_test_token"), httpClient);
+
+        await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz"))
+        {
+        }
+
+        var activity = Assert.Single(activities);
+        Assert.Equal(ActivityStatusCode.Ok, activity.Status);
+        Assert.Equal(0, activity.GetTagItem("xyo.sdk.download.redirect_hop_count"));
+        Assert.Null(activity.GetTagItem("http.request.resend_count"));
+        Assert.Equal(200, activity.GetTagItem("http.response.status_code"));
+    }
 }

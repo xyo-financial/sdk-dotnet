@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
+using System.Net;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace Xyo.Sdk.Telemetry;
 
@@ -108,4 +110,43 @@ public static class XyoTelemetry
     internal const string BoundIdleTimeout = "idle_timeout";
     internal const string BoundTotalDuration = "total_duration";
     internal const string BoundMaxRedirects = "max_redirects";
+
+    private static readonly object[] BoxedStatusCodes = InitializeBoxedStatusCodes();
+
+    private static object[] InitializeBoxedStatusCodes()
+    {
+        var array = new object[500];
+        for (int i = 0; i < array.Length; i++)
+        {
+            array[i] = 100 + i;
+        }
+        return array;
+    }
+
+    /// <summary>
+    /// Returns a pre-allocated boxed <see cref="int"/> object for standard HTTP status codes (100..599)
+    /// to eliminate boxing allocations when setting tags on an <see cref="Activity"/>.
+    /// </summary>
+    /// <param name="statusCode">The HTTP status code as an integer.</param>
+    /// <returns>A boxed <see cref="int"/> object representing the status code.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static object GetBoxedStatusCode(int statusCode)
+    {
+        int index = statusCode - 100;
+        if ((uint)index < (uint)BoxedStatusCodes.Length)
+        {
+            return BoxedStatusCodes[index];
+        }
+
+        return statusCode;
+    }
+
+    /// <summary>
+    /// Returns a pre-allocated boxed <see cref="int"/> object for standard HTTP status codes (100..599)
+    /// to eliminate boxing allocations when setting tags on an <see cref="Activity"/>.
+    /// </summary>
+    /// <param name="statusCode">The HTTP status code.</param>
+    /// <returns>A boxed <see cref="int"/> object representing the status code.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static object GetBoxedStatusCode(HttpStatusCode statusCode) => GetBoxedStatusCode((int)statusCode);
 }

@@ -845,6 +845,11 @@ public sealed class XyoClient : IXyoClient
                 }
             }
 
+            if (progress.RedirectHopCount > 0)
+            {
+                activity?.SetTag("http.request.resend_count", progress.RedirectHopCount);
+            }
+
             try
             {
                 activity?.SetTag("http.response.status_code", XyoTelemetry.GetBoxedStatusCode(response!.StatusCode));
@@ -1388,7 +1393,8 @@ public sealed class XyoClient : IXyoClient
 
     /// <summary>
     /// Completes a <see cref="StreamEnrichmentCollectionAsync"/> span: the SDK-specific attributes from the
-    /// proposed scope (archive entry count, bytes inflated, redirect hop count) plus, on failure, the raw
+    /// proposed scope (archive entry count, bytes inflated, redirect hop count), standard OpenTelemetry
+    /// <c>http.request.resend_count</c> when redirects were followed, plus, on failure, the raw
     /// bytes transferred before the failure -- see <see cref="StreamProgress"/> and
     /// <see cref="ArchiveTransferStatistics"/>.
     /// </summary>
@@ -1407,6 +1413,10 @@ public sealed class XyoClient : IXyoClient
         if (activity is not null)
         {
             activity.SetTag("xyo.sdk.download.redirect_hop_count", progress.RedirectHopCount);
+            if (progress.RedirectHopCount > 0)
+            {
+                activity.SetTag("http.request.resend_count", progress.RedirectHopCount);
+            }
             activity.SetTag("xyo.sdk.archive.entry_count", statistics.EntryCount);
             activity.SetTag("xyo.sdk.archive.bytes_inflated", statistics.InflatedBytes);
             if (progress.IdleStream is not null)
