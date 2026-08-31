@@ -10,6 +10,10 @@ namespace Xyo.Sdk.Client;
 /// </summary>
 public sealed class XyoClientOptions
 {
+    private TimeSpan? _downloadTimeout;
+    private TimeSpan? _downloadConnectTimeout;
+    private TimeSpan? _readIdleTimeout;
+
     /// <summary>
     /// Gets or sets the static API key.
     /// </summary>
@@ -41,16 +45,51 @@ public sealed class XyoClientOptions
 
     /// <summary>
     /// Gets or sets the timeout duration for a single unary API call (default 30 seconds). Does not bound
-    /// archive downloads, see <see cref="DownloadTimeout"/>.
+    /// archive downloads, see <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/>.
     /// </summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Gets or sets the timeout duration for archive download and stream processing (default 10 minutes),
-    /// independent of <see cref="Timeout"/>. Enforces a deadline on initial HTTP connection/redirects and
-    /// acts as a per-read idle stall timeout during stream decompression.
+    /// Gets or sets the deadline for the connection and redirect phase of an archive download (default 10
+    /// minutes): establishing the HTTP connection, following redirects, and waiting for response headers.
+    /// Does not bound time spent reading the archive body once headers arrive; see
+    /// <see cref="ReadIdleTimeout"/> for that. Falls back to the obsolete <see cref="DownloadTimeout"/>'s
+    /// value when this property is not itself set explicitly, exactly as <see cref="ToConfig"/> resolves it
+    /// -- both share <see cref="EffectiveDownloadConnectTimeout"/>, so this getter never disagrees with the
+    /// value <see cref="ToConfig"/> makes effective. Not validated until <see cref="ToConfig"/> is called:
+    /// see that method's remarks.
     /// </summary>
-    public TimeSpan DownloadTimeout { get; set; } = TimeSpan.FromMinutes(10);
+    public TimeSpan DownloadConnectTimeout
+    {
+        get => EffectiveDownloadConnectTimeout;
+        set => _downloadConnectTimeout = value;
+    }
+
+    /// <summary>
+    /// Gets or sets the idle stall timeout for a single network read during archive streaming (default 120
+    /// seconds), reset on every read. See <see cref="DownloadConnectTimeout"/> for the earlier
+    /// connection/redirect phase, including the fallback and validation-timing notes that apply here too.
+    /// </summary>
+    public TimeSpan ReadIdleTimeout
+    {
+        get => EffectiveReadIdleTimeout;
+        set => _readIdleTimeout = value;
+    }
+
+    /// <summary>
+    /// Gets or sets the timeout duration previously applied to both the connection/redirect phase and the
+    /// per-read idle stall detection of an archive download. Superseded by
+    /// <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/>, which separate those two
+    /// unrelated roles. When set, it seeds the value of whichever of those two properties is not itself set
+    /// explicitly, via <see cref="ToConfig"/>, so existing configuration keeps working. Scheduled for
+    /// removal in the next major version per the versioning policy in CONTRIBUTING.md.
+    /// </summary>
+    [Obsolete("Use DownloadConnectTimeout (connection/redirect deadline) and ReadIdleTimeout (per-read stall timeout) instead. DownloadTimeout still seeds both when set, but conflates two unrelated roles and will be removed in the next major version.")]
+    public TimeSpan DownloadTimeout
+    {
+        get => _downloadTimeout ?? XyoClientConfig.DefaultDownloadConnectTimeout;
+        set => _downloadTimeout = value;
+    }
 
     /// <summary>
     /// Gets or sets the maximum cumulative time an archive transfer may spend waiting on the network across
@@ -92,8 +131,31 @@ public sealed class XyoClientOptions
     public Dictionary<string, string> DefaultHeaders { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// The single expression of the DownloadConnectTimeout fallback rule (explicit value, else the obsolete
+    /// <see cref="DownloadTimeout"/> seed if the caller set it, else the shared default), shared by the
+    /// <see cref="DownloadConnectTimeout"/> getter and <see cref="ToConfig"/> so the two cannot drift the
+    /// way they previously did: reading <see cref="DownloadConnectTimeout"/> used to return the hardcoded
+    /// default even when <see cref="DownloadTimeout"/> had been set, while <see cref="ToConfig"/> correctly
+    /// applied the seed -- the same property reading back a different value from the one that took effect.
+    /// </summary>
+    private TimeSpan EffectiveDownloadConnectTimeout =>
+        _downloadConnectTimeout ?? _downloadTimeout ?? XyoClientConfig.DefaultDownloadConnectTimeout;
+
+    /// <summary>
+    /// The ReadIdleTimeout equivalent of <see cref="EffectiveDownloadConnectTimeout"/>; see its remarks.
+    /// </summary>
+    private TimeSpan EffectiveReadIdleTimeout =>
+        _readIdleTimeout ?? _downloadTimeout ?? XyoClientConfig.DefaultReadIdleTimeout;
+
+    /// <summary>
     /// Converts this options instance to an immutable <see cref="XyoClientConfig"/>.
     /// </summary>
+    /// <remarks>
+    /// Validation of <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/> (positive, or
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>) happens here, via the assignments below
+    /// routing through <see cref="XyoClientConfig"/>'s own <c>init</c> accessors, rather than being
+    /// duplicated on this type's setters. That keeps the constraint expressed in exactly one place.
+    /// </remarks>
     public XyoClientConfig ToConfig()
     {
         // Validated here rather than left to the BaseUrl init accessor below, so a bad value carries the
@@ -107,6 +169,12 @@ public sealed class XyoClientOptions
         // saving is one Uri.TryCreate per config construction (once per process for a DI singleton).
         XyoClientConfig.ValidateEffectiveBaseUrl(BaseUrl, "XyoClientOptions.BaseUrl", nameof(BaseUrl));
 
+        // DownloadConnectTimeout/ReadIdleTimeout are assigned the already-resolved Effective* values, not
+        // the raw nullable fields, and never DownloadTimeout itself: EffectiveDownloadConnectTimeout and
+        // EffectiveReadIdleTimeout each already fold in the obsolete DownloadTimeout seed (only when the
+        // caller actually set it) ahead of the shared default, so there is exactly one place -- not three --
+        // that knows the fallback order. This also means the obsolete DownloadTimeout property on
+        // XyoClientConfig itself is never touched here, so no CS0618 suppression is needed in this method.
         return new XyoClientConfig(ApiKey)
         {
             ApiKeySupplier = ApiKeySupplier,
@@ -114,7 +182,8 @@ public sealed class XyoClientOptions
             CorrelationId = CorrelationId,
             Traceparent = Traceparent,
             Timeout = Timeout,
-            DownloadTimeout = DownloadTimeout,
+            DownloadConnectTimeout = EffectiveDownloadConnectTimeout,
+            ReadIdleTimeout = EffectiveReadIdleTimeout,
             MaxTotalDownloadDuration = MaxTotalDownloadDuration,
             MaxArchiveBytes = MaxArchiveBytes,
             MaxDecompressedBytes = MaxDecompressedBytes,

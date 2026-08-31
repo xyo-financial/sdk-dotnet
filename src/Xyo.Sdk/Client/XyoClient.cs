@@ -119,7 +119,8 @@ public sealed class XyoClient : IXyoClient
                 // HttpClient.Timeout is a single TOTAL deadline that keeps running while a response stream is
                 // consumed, which would kill a multi-hundred-MB archive download mid-stream. Deadlines are
                 // enforced per call instead, via linked CancellationTokenSources: Timeout for unary calls
-                // (see SendRequestAsync) and DownloadTimeout for StreamEnrichmentCollectionAsync.
+                // (see SendRequestAsync) and DownloadConnectTimeout and ReadIdleTimeout for
+                // StreamEnrichmentCollectionAsync.
                 Timeout = System.Threading.Timeout.InfiniteTimeSpan
             };
             _ownsHttpClient = true;
@@ -368,9 +369,10 @@ public sealed class XyoClient : IXyoClient
         Uri validatedUri = _securityPolicy.ValidateDownloadUrl(downloadUrl);
         HttpResponseMessage? response = null;
 
-        // DownloadTimeout bounds the whole operation (every redirect hop plus the full download and
-        // decompression), independently of the shorter unary-call Timeout -- see SendRequestAsync.
-        using var timeoutCts = new CancellationTokenSource(_config.DownloadTimeout);
+        // DownloadConnectTimeout bounds only the connection/redirect phase (every redirect hop up to and
+        // including receiving response headers), independently of both the shorter unary-call Timeout (see
+        // SendRequestAsync) and the per-read idle bound applied to the archive body below (ReadIdleTimeout).
+        using var timeoutCts = new CancellationTokenSource(_config.DownloadConnectTimeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
         CancellationToken effectiveToken = linkedCts.Token;
 
@@ -403,7 +405,9 @@ public sealed class XyoClient : IXyoClient
                 }
                 catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
                 {
-                    throw new XyoNetworkException($"Archive download timed out after {_config.DownloadTimeout.TotalSeconds} seconds.", ex);
+                    throw new XyoNetworkException(
+                        $"Archive download connection phase timed out after {_config.DownloadConnectTimeout.TotalSeconds} " +
+                        "seconds while establishing the connection, following redirects, or waiting for response headers.", ex);
                 }
                 catch (OperationCanceledException)
                 {
@@ -441,17 +445,32 @@ public sealed class XyoClient : IXyoClient
                 validatedUri = _securityPolicy.ValidateDownloadUrl(nextUri.ToString());
             }
 
-            await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
+            try
+            {
+                await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new XyoNetworkException(
+                    $"Archive download connection phase timed out after {_config.DownloadConnectTimeout.TotalSeconds} " +
+                    "seconds while establishing the connection, following redirects, or waiting for response headers.", ex);
+            }
+
+            // The connection phase is over: DownloadConnectTimeout is spent and must not reach the body.
+            // Disarming reuses the existing timer (Timer.Change under the hood) rather than leaving it
+            // scheduled to fire mid-transfer for nothing, and turns effectiveToken from "in scope but must
+            // not be used" into "in scope and inert" for the remainder of this method.
+            timeoutCts.CancelAfter(System.Threading.Timeout.InfiniteTimeSpan);
 
             using var responseStream = await response!.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            // DownloadTimeout is the per-read idle bound (it trips only when the peer stops sending);
+            // ReadIdleTimeout is the per-read idle bound (it trips only when the peer stops sending);
             // MaxTotalDownloadDuration bounds the cumulative time spent waiting on the network, so a peer
             // that drips bytes just inside every idle window cannot hold the transfer open indefinitely.
             // Neither counts the caller's own processing time between yielded records. leaveOpen because the
             // `using` on `responseStream` above already owns its lifetime.
             using var idleStream = new IdleTimeoutStream(
                 responseStream,
-                _config.DownloadTimeout,
+                _config.ReadIdleTimeout,
                 _config.MaxTotalDownloadDuration,
                 leaveOpen: true);
 
@@ -927,10 +946,19 @@ public sealed class XyoClient : IXyoClient
 
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
+            if (_idleTimeout == Timeout.InfiniteTimeSpan)
+            {
+                long start = Stopwatch.GetTimestamp();
+                int read = await _inner.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                _cumulativeReadTicks += Stopwatch.GetTimestamp() - start;
+                ThrowIfTotalBudgetExceeded();
+                return read;
+            }
+
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(_idleTimeout);
 
-            long start = Stopwatch.GetTimestamp();
+            long startTimestamp = Stopwatch.GetTimestamp();
             try
             {
                 int read = await _inner.ReadAsync(buffer, cts.Token).ConfigureAwait(false);
@@ -938,14 +966,15 @@ public sealed class XyoClient : IXyoClient
                 // Accumulated on the success path only. The stall path below throws regardless, and adding to
                 // the budget from a finally block would let a budget violation replace the stall exception
                 // already propagating out.
-                _cumulativeReadTicks += Stopwatch.GetTimestamp() - start;
+                _cumulativeReadTicks += Stopwatch.GetTimestamp() - startTimestamp;
                 ThrowIfTotalBudgetExceeded();
                 return read;
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new XyoNetworkException(
-                    $"Archive download stalled for more than {_idleTimeout.TotalSeconds} seconds.", ex);
+                    $"Archive download read stalled: the peer did not produce further data within " +
+                    $"{_idleTimeout.TotalSeconds} seconds.", ex);
             }
         }
 

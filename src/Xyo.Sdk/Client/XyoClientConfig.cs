@@ -11,6 +11,17 @@ namespace Xyo.Sdk.Client;
 /// <summary>
 /// Immutable configuration options for initializing the XYO Financial SDK client.
 /// </summary>
+/// <remarks>
+/// As a <c>record</c>, structural equality (<c>==</c>, <see cref="Equals(object?)"/>,
+/// <see cref="GetHashCode"/>) compares the configuration as written, not as resolved: a config with
+/// <see cref="DownloadConnectTimeout"/> left unset (so it resolves to the ten-minute default) and one with
+/// <see cref="DownloadConnectTimeout"/> set explicitly to ten minutes compare unequal, because the two
+/// differ in their internal null-vs-set state even though every request they produce behaves identically.
+/// The same applies to <see cref="ReadIdleTimeout"/> and the obsolete <see cref="DownloadTimeout"/> alias.
+/// Do not rely on structural equality (e.g. as a <c>Dictionary</c> key, or to deduplicate configurations) to
+/// mean "these two configs behave the same" for these three members; compare the resolved properties
+/// directly instead.
+/// </remarks>
 public sealed record XyoClientConfig
 {
     private const string DefaultProductionUrl = "https://api.xyo.financial";
@@ -19,9 +30,18 @@ public sealed record XyoClientConfig
         @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\z",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // Internal rather than private so XyoClientOptions can share the same defaults instead of hardcoding
+    // its own copies (see XyoClientOptions.EffectiveDownloadConnectTimeout / EffectiveReadIdleTimeout),
+    // which is what let its getters and ToConfig() disagree in the first place.
+    internal static readonly TimeSpan DefaultDownloadConnectTimeout = TimeSpan.FromMinutes(10);
+    internal static readonly TimeSpan DefaultReadIdleTimeout = TimeSpan.FromSeconds(120);
+
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string? _apiKey;
     private string? _traceparent;
+    private TimeSpan? _legacyDownloadTimeout;
+    private TimeSpan? _downloadConnectTimeoutOverride;
+    private TimeSpan? _readIdleTimeoutOverride;
     // Deliberately NOT validated here: this field initializer runs on every construction, before an
     // explicit `BaseUrl = ...` in an object initializer is applied. Validating eagerly would mean an
     // invalid XYO_API_BASE_URL breaks construction even when the caller overrides BaseUrl explicitly.
@@ -78,22 +98,84 @@ public sealed record XyoClientConfig
         }
     }
 
+    private TimeSpan _timeout = TimeSpan.FromSeconds(30);
+    private TimeSpan _maxTotalDownloadDuration = TimeSpan.FromHours(1);
+
     /// <summary>
     /// Gets the timeout duration for a single unary API call (enrichment, batch submit, status lookup).
     /// Enforced independently per call via a linked cancellation token; does not bound archive downloads,
-    /// see <see cref="DownloadTimeout"/>.
+    /// see <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/>.
     /// </summary>
-    public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
+    public TimeSpan Timeout
+    {
+        get => _timeout;
+        init => _timeout = ValidateDownloadTimeout(value, nameof(Timeout));
+    }
 
     /// <summary>
-    /// Gets the timeout duration for archive download and stream processing
-    /// (<see cref="Xyo.Sdk.Client.IXyoClient.StreamEnrichmentCollectionAsync"/> /
-    /// <see cref="Xyo.Sdk.Client.IXyoClient.DownloadEnrichmentCollectionAsync"/>).
-    /// Enforces a deadline on initial HTTP connection/redirects, and serves as an idle stall timeout
-    /// between network reads during stream processing. Kept independent of <see cref="Timeout"/> because a
-    /// multi-hundred-MB archive legitimately needs far longer than a single unary call.
+    /// Gets the deadline for the connection and redirect phase of an archive download (default 10 minutes):
+    /// establishing the HTTP connection, following redirects, and waiting for response headers, for
+    /// <see cref="Xyo.Sdk.Client.IXyoClient.StreamEnrichmentCollectionAsync"/> /
+    /// <see cref="Xyo.Sdk.Client.IXyoClient.DownloadEnrichmentCollectionAsync"/>. Does not bound time spent
+    /// reading the archive body once headers arrive; see <see cref="ReadIdleTimeout"/> for that. Falls back
+    /// to the obsolete <see cref="DownloadTimeout"/>'s value when this property is not itself set
+    /// explicitly (see that property's remarks).
     /// </summary>
-    public TimeSpan DownloadTimeout { get; init; } = TimeSpan.FromMinutes(10);
+    /// <remarks>
+    /// Must be a positive duration, or <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to disable
+    /// the bound entirely. Disabling it deliberately reopens a header-phase slowloris: a peer that accepts
+    /// the connection but never returns response headers can hold the call open indefinitely, so a caller
+    /// who sets this to <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> must keep
+    /// <see cref="MaxTotalDownloadDuration"/> finite, since that becomes the only remaining time bound (and
+    /// even then, only after the read phase starts -- see that property's remarks).
+    /// </remarks>
+    public TimeSpan DownloadConnectTimeout
+    {
+        get => _downloadConnectTimeoutOverride ?? _legacyDownloadTimeout ?? DefaultDownloadConnectTimeout;
+        init => _downloadConnectTimeoutOverride = ValidateDownloadTimeout(value, nameof(DownloadConnectTimeout));
+    }
+
+    /// <summary>
+    /// Gets the idle stall timeout for a single network read during archive streaming (default 120
+    /// seconds), reset on every read. Bounds how long a peer may go without producing the next chunk of the
+    /// archive body once response headers have arrived; see <see cref="DownloadConnectTimeout"/> for the
+    /// earlier connection/redirect phase. Falls back to the obsolete <see cref="DownloadTimeout"/>'s value
+    /// when this property is not itself set explicitly (see that property's remarks).
+    /// </summary>
+    /// <remarks>
+    /// Does not, on its own, bound the transfer as a whole -- see <see cref="MaxTotalDownloadDuration"/> for
+    /// why a per-read idle bound alone cannot do that. Must be a positive duration, or
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to disable the bound entirely; disabling it
+    /// also silently defeats <see cref="MaxTotalDownloadDuration"/>, because that budget is only evaluated
+    /// after a read returns, so a read that never returns never reaches the check.
+    /// </remarks>
+    public TimeSpan ReadIdleTimeout
+    {
+        get => _readIdleTimeoutOverride ?? _legacyDownloadTimeout ?? DefaultReadIdleTimeout;
+        init => _readIdleTimeoutOverride = ValidateDownloadTimeout(value, nameof(ReadIdleTimeout));
+    }
+
+    /// <summary>
+    /// Gets the timeout duration previously applied to both the connection/redirect phase and the per-read
+    /// idle stall detection of an archive download.
+    /// </summary>
+    /// <remarks>
+    /// Superseded by <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/>, which separate
+    /// those two unrelated roles: ten minutes is a defensible connection deadline but a very slow stall
+    /// detector, so a single value could not be right for both. When set, this property seeds the value of
+    /// whichever of <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/> was not itself
+    /// set explicitly, so existing configuration keeps working. Note this is an observable behaviour
+    /// change for a caller relying solely on the pre-split default: the effective stall timeout drops from
+    /// this property's 10-minute default to <see cref="ReadIdleTimeout"/>'s 120-second default -- see
+    /// CHANGELOG.md. Scheduled for removal in the next major version per the versioning policy in
+    /// CONTRIBUTING.md.
+    /// </remarks>
+    [Obsolete("Use DownloadConnectTimeout (connection/redirect deadline) and ReadIdleTimeout (per-read stall timeout) instead. DownloadTimeout still seeds both when set, but conflates two unrelated roles and will be removed in the next major version.")]
+    public TimeSpan DownloadTimeout
+    {
+        get => _legacyDownloadTimeout ?? DefaultDownloadConnectTimeout;
+        init => _legacyDownloadTimeout = ValidateDownloadTimeout(value, nameof(DownloadTimeout));
+    }
 
     /// <summary>
     /// Gets the maximum cumulative time an archive transfer may spend waiting on the network, across all
@@ -102,14 +184,20 @@ public sealed record XyoClientConfig
     /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to disable.
     /// </summary>
     /// <remarks>
-    /// <see cref="DownloadTimeout"/> resets on every read, so on its own it bounds nothing cumulative: a peer
+    /// <see cref="ReadIdleTimeout"/> resets on every read, so on its own it bounds nothing cumulative: a peer
     /// delivering a few bytes just inside each idle window keeps the connection and the enumerating task
     /// alive indefinitely, because no individual read ever stalls. The byte bounds
     /// (<see cref="MaxArchiveBytes"/>, <see cref="MaxDecompressedBytes"/>, <see cref="MaxTarEntries"/>) do
     /// not help either, since such a transfer is bounded in bytes and unbounded in time. This is the bound
-    /// that turns "a job that neither completes nor fails" into a job that fails.
+    /// that turns "a job that neither completes nor fails" into a job that fails. Note the budget is only
+    /// checked once a read returns, so a single stalled read can overshoot this bound by up to one
+    /// <see cref="ReadIdleTimeout"/> before the overshoot is caught.
     /// </remarks>
-    public TimeSpan MaxTotalDownloadDuration { get; init; } = TimeSpan.FromHours(1);
+    public TimeSpan MaxTotalDownloadDuration
+    {
+        get => _maxTotalDownloadDuration;
+        init => _maxTotalDownloadDuration = ValidateDownloadTimeout(value, nameof(MaxTotalDownloadDuration));
+    }
 
     /// <summary>
     /// Gets the maximum allowed download archive byte size for bulk processing (default 100 MiB).
@@ -288,7 +376,9 @@ public sealed record XyoClientConfig
     public override string ToString()
     {
         string tokenDisplay = string.IsNullOrEmpty(_apiKey) ? "(Dynamic/None)" : "[REDACTED]";
-        return $"XyoClientConfig {{ BaseUrl = '{BaseUrl}', ApiKey = '{tokenDisplay}', Timeout = {Timeout.TotalSeconds}s, CorrelationId = '{CorrelationId}', Traceparent = '{Traceparent}' }}";
+        return $"XyoClientConfig {{ BaseUrl = '{BaseUrl}', ApiKey = '{tokenDisplay}', Timeout = {Timeout.TotalSeconds}s, " +
+            $"DownloadConnectTimeout = {DownloadConnectTimeout.TotalSeconds}s, ReadIdleTimeout = {ReadIdleTimeout.TotalSeconds}s, " +
+            $"CorrelationId = '{CorrelationId}', Traceparent = '{Traceparent}' }}";
     }
 
     private static string ResolveDefaultBaseUrl()
@@ -382,6 +472,39 @@ public sealed record XyoClientConfig
                 "If BaseUrl was not set explicitly, check the XYO_API_BASE_URL environment variable.",
                 paramName, ex);
         }
+    }
+
+    /// <summary>
+    /// Validates a candidate <see cref="DownloadConnectTimeout"/>, <see cref="ReadIdleTimeout"/>,
+    /// <see cref="DownloadTimeout"/>, <see cref="Timeout"/>, or <see cref="MaxTotalDownloadDuration"/> value:
+    /// it must be a positive duration not exceeding <see cref="int.MaxValue"/> milliseconds (~24.8 days),
+    /// or <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to explicitly disable the bound.
+    /// </summary>
+    /// <remarks>
+    /// The message deliberately does not echo <paramref name="value"/>: these are network timeouts, not
+    /// secrets, but a caller misconfiguring one from an expression (e.g. a miscomputed
+    /// <c>TimeSpan.FromSeconds(-retryCount)</c>) gains nothing from the value being restated, and every
+    /// other validated member of this type (<see cref="BaseUrl"/>, <see cref="DefaultHeaders"/>,
+    /// <see cref="TrustedDownloadHosts"/>, <see cref="Traceparent"/>) follows the same convention of naming
+    /// the property and the constraint, not the offending value.
+    /// </remarks>
+    private static TimeSpan ValidateDownloadTimeout(TimeSpan value, string propertyName)
+    {
+        if (value == System.Threading.Timeout.InfiniteTimeSpan)
+        {
+            // Deliberately allowed: an explicit opt-out of this bound. See the remarks on
+            // DownloadConnectTimeout and ReadIdleTimeout for what a caller relying on this must also do.
+            return value;
+        }
+
+        if (value <= TimeSpan.Zero || value.TotalMilliseconds > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                propertyName,
+                $"{propertyName} must be a positive duration not exceeding {int.MaxValue} milliseconds (~24.8 days), or Timeout.InfiniteTimeSpan to disable the bound.");
+        }
+
+        return value;
     }
 
     private static bool IsLoopbackHost(string host)

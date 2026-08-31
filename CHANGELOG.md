@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automated spec regeneration pipeline (`.github/workflows/generate.yml`) listening to `repository_dispatch` from `xyo-financial/specs`.
 - GitHub release workflow (`.github/workflows/release.yml`) with SBOM generation, SHA-256 checksums, and artifact provenance attestations.
 - Standalone `.NET LTS Support Schedule` SVG graphic in `docs/lts_schedule.svg` and proactive 3-month LTS sunset policy in `SECURITY.md`.
+- `XyoClientConfig.DownloadConnectTimeout` and `XyoClientConfig.ReadIdleTimeout` (also on `XyoClientOptions`), splitting the two unrelated roles previously served by `DownloadTimeout`: a deadline on connection establishment, redirect resolution, and response header retrieval (`DownloadConnectTimeout`, default 10 minutes), and a per-read idle stall timeout during archive streaming (`ReadIdleTimeout`, default 120 seconds). Both (and the obsolete `DownloadTimeout` seed) are validated at construction: a non-positive value throws `ArgumentOutOfRangeException`, and `Timeout.InfiniteTimeSpan` is accepted as an explicit opt-out of the bound.
+
+### Changed
+- **Behaviour change:** the effective stall timeout for archive downloads (`StreamEnrichmentCollectionAsync` / `DownloadEnrichmentCollectionAsync`) drops from the old `DownloadTimeout` default of 10 minutes to `ReadIdleTimeout`'s default of 120 seconds. A peer that previously had up to 10 minutes to produce the next byte of a download before being dropped is now dropped after 2 minutes. This only affects stall detection; the connection/redirect deadline (`DownloadConnectTimeout`) keeps the previous 10-minute default. Set `ReadIdleTimeout` explicitly to restore a longer allowance if your environment needs one.
+
+### Deprecated
+- `XyoClientConfig.DownloadTimeout` and `XyoClientOptions.DownloadTimeout` are marked `[Obsolete]` in favour of `DownloadConnectTimeout` and `ReadIdleTimeout`. When set, `DownloadTimeout` still seeds both replacement properties, so existing configuration keeps working, but it is scheduled for removal in the next major version.
 
 ---
 
