@@ -358,7 +358,7 @@ public class TelemetryTests
             return Task.FromResult(response);
         });
         using var httpClient = new HttpClient(handler);
-        var config = new XyoClientConfig("xyo_test_token") { DownloadTimeout = TimeSpan.FromMilliseconds(200) };
+        var config = new XyoClientConfig("xyo_test_token") { ReadIdleTimeout = TimeSpan.FromMilliseconds(200) };
         using var client = new XyoClient(config, httpClient);
 
         await Assert.ThrowsAsync<XyoNetworkException>(async () =>
