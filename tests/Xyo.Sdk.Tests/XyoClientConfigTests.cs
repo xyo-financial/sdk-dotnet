@@ -373,4 +373,118 @@ public class XyoClientConfigTests
         Assert.Equal(TimeSpan.FromMinutes(5), options.DownloadConnectTimeout);
         Assert.Equal(TimeSpan.FromMinutes(5), options.ReadIdleTimeout);
     }
+
+    [Fact]
+    public void XyoClientOptions_DownloadTimeout_DefaultFallback_MatchesConfigDefault()
+    {
+#pragma warning disable CS0618
+        var options = new XyoClientOptions();
+        Assert.Equal(XyoClientConfig.DefaultDownloadConnectTimeout, options.DownloadTimeout);
+#pragma warning restore CS0618
+    }
+
+    [Theory]
+    [InlineData(30)]      // 30 days > ~24.85 days (int.MaxValue ms)
+    [InlineData(100)]     // 100 days
+    [InlineData(365)]     // 1 year
+    public void DownloadConnectTimeout_ExceedingIntMaxValue_ThrowsWithoutEchoingValue(double days)
+    {
+        var value = TimeSpan.FromDays(days);
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { DownloadConnectTimeout = value });
+
+        Assert.Equal(nameof(XyoClientConfig.DownloadConnectTimeout), ex.ParamName);
+        Assert.DoesNotContain(value.ToString(), ex.Message);
+    }
+
+    [Fact]
+    public void DownloadConnectTimeout_TimeSpanMaxValue_ThrowsWithoutEchoingValue()
+    {
+        var value = TimeSpan.MaxValue;
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { DownloadConnectTimeout = value });
+
+        Assert.Equal(nameof(XyoClientConfig.DownloadConnectTimeout), ex.ParamName);
+        Assert.DoesNotContain(value.ToString(), ex.Message);
+    }
+
+    [Theory]
+    [InlineData(30)]
+    [InlineData(100)]
+    [InlineData(365)]
+    public void ReadIdleTimeout_ExceedingIntMaxValue_ThrowsWithoutEchoingValue(double days)
+    {
+        var value = TimeSpan.FromDays(days);
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { ReadIdleTimeout = value });
+
+        Assert.Equal(nameof(XyoClientConfig.ReadIdleTimeout), ex.ParamName);
+        Assert.DoesNotContain(value.ToString(), ex.Message);
+    }
+
+    [Fact]
+    public void ReadIdleTimeout_TimeSpanMaxValue_ThrowsWithoutEchoingValue()
+    {
+        var value = TimeSpan.MaxValue;
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { ReadIdleTimeout = value });
+
+        Assert.Equal(nameof(XyoClientConfig.ReadIdleTimeout), ex.ParamName);
+        Assert.DoesNotContain(value.ToString(), ex.Message);
+    }
+
+    [Fact]
+#pragma warning disable CS0618
+    public void DownloadTimeout_ExceedingIntMaxValue_ThrowsWithoutEchoingValue()
+    {
+        var ex1 = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { DownloadTimeout = TimeSpan.FromDays(30) });
+        Assert.Equal(nameof(XyoClientConfig.DownloadTimeout), ex1.ParamName);
+
+        var ex2 = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { DownloadTimeout = TimeSpan.MaxValue });
+        Assert.Equal(nameof(XyoClientConfig.DownloadTimeout), ex2.ParamName);
+    }
+#pragma warning restore CS0618
+
+    [Fact]
+    public void Timeout_ExceedingIntMaxValueOrNonPositive_ThrowsWithoutEchoingValue()
+    {
+        var ex1 = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { Timeout = TimeSpan.FromDays(30) });
+        Assert.Equal(nameof(XyoClientConfig.Timeout), ex1.ParamName);
+
+        var ex2 = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { Timeout = TimeSpan.MaxValue });
+        Assert.Equal(nameof(XyoClientConfig.Timeout), ex2.ParamName);
+
+        var ex3 = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { Timeout = TimeSpan.Zero });
+        Assert.Equal(nameof(XyoClientConfig.Timeout), ex3.ParamName);
+
+        var ex4 = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key").WithTimeout(TimeSpan.FromDays(30)));
+        Assert.Equal(nameof(XyoClientConfig.Timeout), ex4.ParamName);
+    }
+
+    [Fact]
+    public void MaxTotalDownloadDuration_ExceedingIntMaxValueOrNonPositive_ThrowsWithoutEchoingValue()
+    {
+        var ex1 = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { MaxTotalDownloadDuration = TimeSpan.FromDays(30) });
+        Assert.Equal(nameof(XyoClientConfig.MaxTotalDownloadDuration), ex1.ParamName);
+
+        var ex2 = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { MaxTotalDownloadDuration = TimeSpan.MaxValue });
+        Assert.Equal(nameof(XyoClientConfig.MaxTotalDownloadDuration), ex2.ParamName);
+
+        var ex3 = Assert.Throws<ArgumentOutOfRangeException>(() => new XyoClientConfig("key") { MaxTotalDownloadDuration = TimeSpan.Zero });
+        Assert.Equal(nameof(XyoClientConfig.MaxTotalDownloadDuration), ex3.ParamName);
+    }
+
+    [Fact]
+    public void DownloadConnectTimeoutAndReadIdleTimeout_IntMaxValueMilliseconds_Allowed()
+    {
+        var maxAllowed = TimeSpan.FromMilliseconds(int.MaxValue);
+        var config = new XyoClientConfig("key")
+        {
+            DownloadConnectTimeout = maxAllowed,
+            ReadIdleTimeout = maxAllowed,
+            Timeout = maxAllowed,
+            MaxTotalDownloadDuration = maxAllowed
+        };
+
+        Assert.Equal(maxAllowed, config.DownloadConnectTimeout);
+        Assert.Equal(maxAllowed, config.ReadIdleTimeout);
+        Assert.Equal(maxAllowed, config.Timeout);
+        Assert.Equal(maxAllowed, config.MaxTotalDownloadDuration);
+    }
 }

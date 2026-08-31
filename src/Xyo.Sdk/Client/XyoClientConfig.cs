@@ -98,12 +98,19 @@ public sealed record XyoClientConfig
         }
     }
 
+    private TimeSpan _timeout = TimeSpan.FromSeconds(30);
+    private TimeSpan _maxTotalDownloadDuration = TimeSpan.FromHours(1);
+
     /// <summary>
     /// Gets the timeout duration for a single unary API call (enrichment, batch submit, status lookup).
     /// Enforced independently per call via a linked cancellation token; does not bound archive downloads,
     /// see <see cref="DownloadConnectTimeout"/> and <see cref="ReadIdleTimeout"/>.
     /// </summary>
-    public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
+    public TimeSpan Timeout
+    {
+        get => _timeout;
+        init => _timeout = ValidateDownloadTimeout(value, nameof(Timeout));
+    }
 
     /// <summary>
     /// Gets the deadline for the connection and redirect phase of an archive download (default 10 minutes):
@@ -186,7 +193,11 @@ public sealed record XyoClientConfig
     /// checked once a read returns, so a single stalled read can overshoot this bound by up to one
     /// <see cref="ReadIdleTimeout"/> before the overshoot is caught.
     /// </remarks>
-    public TimeSpan MaxTotalDownloadDuration { get; init; } = TimeSpan.FromHours(1);
+    public TimeSpan MaxTotalDownloadDuration
+    {
+        get => _maxTotalDownloadDuration;
+        init => _maxTotalDownloadDuration = ValidateDownloadTimeout(value, nameof(MaxTotalDownloadDuration));
+    }
 
     /// <summary>
     /// Gets the maximum allowed download archive byte size for bulk processing (default 100 MiB).
@@ -464,9 +475,10 @@ public sealed record XyoClientConfig
     }
 
     /// <summary>
-    /// Validates a candidate <see cref="DownloadConnectTimeout"/>, <see cref="ReadIdleTimeout"/>, or
-    /// <see cref="DownloadTimeout"/> value: it must be a positive duration, or
-    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to explicitly disable the bound.
+    /// Validates a candidate <see cref="DownloadConnectTimeout"/>, <see cref="ReadIdleTimeout"/>,
+    /// <see cref="DownloadTimeout"/>, <see cref="Timeout"/>, or <see cref="MaxTotalDownloadDuration"/> value:
+    /// it must be a positive duration not exceeding <see cref="int.MaxValue"/> milliseconds (~24.8 days),
+    /// or <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to explicitly disable the bound.
     /// </summary>
     /// <remarks>
     /// The message deliberately does not echo <paramref name="value"/>: these are network timeouts, not
@@ -485,11 +497,11 @@ public sealed record XyoClientConfig
             return value;
         }
 
-        if (value <= TimeSpan.Zero)
+        if (value <= TimeSpan.Zero || value.TotalMilliseconds > int.MaxValue)
         {
             throw new ArgumentOutOfRangeException(
                 propertyName,
-                $"{propertyName} must be a positive duration, or Timeout.InfiniteTimeSpan to disable the bound.");
+                $"{propertyName} must be a positive duration not exceeding {int.MaxValue} milliseconds (~24.8 days), or Timeout.InfiniteTimeSpan to disable the bound.");
         }
 
         return value;

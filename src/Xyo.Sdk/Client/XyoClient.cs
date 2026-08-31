@@ -445,7 +445,16 @@ public sealed class XyoClient : IXyoClient
                 validatedUri = _securityPolicy.ValidateDownloadUrl(nextUri.ToString());
             }
 
-            await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
+            try
+            {
+                await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new XyoNetworkException(
+                    $"Archive download connection phase timed out after {_config.DownloadConnectTimeout.TotalSeconds} " +
+                    "seconds while establishing the connection, following redirects, or waiting for response headers.", ex);
+            }
 
             // The connection phase is over: DownloadConnectTimeout is spent and must not reach the body.
             // Disarming reuses the existing timer (Timer.Change under the hood) rather than leaving it
@@ -937,10 +946,19 @@ public sealed class XyoClient : IXyoClient
 
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
+            if (_idleTimeout == Timeout.InfiniteTimeSpan)
+            {
+                long start = Stopwatch.GetTimestamp();
+                int read = await _inner.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                _cumulativeReadTicks += Stopwatch.GetTimestamp() - start;
+                ThrowIfTotalBudgetExceeded();
+                return read;
+            }
+
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(_idleTimeout);
 
-            long start = Stopwatch.GetTimestamp();
+            long startTimestamp = Stopwatch.GetTimestamp();
             try
             {
                 int read = await _inner.ReadAsync(buffer, cts.Token).ConfigureAwait(false);
@@ -948,7 +966,7 @@ public sealed class XyoClient : IXyoClient
                 // Accumulated on the success path only. The stall path below throws regardless, and adding to
                 // the budget from a finally block would let a budget violation replace the stall exception
                 // already propagating out.
-                _cumulativeReadTicks += Stopwatch.GetTimestamp() - start;
+                _cumulativeReadTicks += Stopwatch.GetTimestamp() - startTimestamp;
                 ThrowIfTotalBudgetExceeded();
                 return read;
             }

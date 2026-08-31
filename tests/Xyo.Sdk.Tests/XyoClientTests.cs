@@ -1214,4 +1214,98 @@ public class XyoClientTests
         // The caller's own object is never mutated in place by normalisation.
         Assert.Equal("gb", lowercase.CountryCode);
     }
+
+    private sealed class DelayedReadStream : Stream
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+            return 0;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_ErrorResponseReadTimesOut_ThrowsXyoNetworkException()
+    {
+        // When the server returns an error response (e.g. 500) but reading the error payload body times out
+        // during the connection phase, the timeout must be translated to XyoNetworkException rather than
+        // escaping as a raw OperationCanceledException.
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StreamContent(new DelayedReadStream())
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(handler);
+        var config = new XyoClientConfig("xyo_test_token")
+        {
+            DownloadConnectTimeout = TimeSpan.FromMilliseconds(150)
+        };
+        using var client = new XyoClient(config, httpClient);
+
+        var ex = await Assert.ThrowsAsync<XyoNetworkException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+            {
+            }
+        });
+
+        Assert.Contains("connection phase timed out", ex.Message);
+    }
+
+    [Fact]
+    public async Task StreamEnrichmentCollectionAsync_ErrorResponseReadCallerCancelled_ThrowsOperationCanceledException()
+    {
+        using var cts = new CancellationTokenSource();
+        var handler = new MockHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StreamContent(new DelayedReadStream())
+            };
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(handler);
+        var config = new XyoClientConfig("xyo_test_token")
+        {
+            DownloadConnectTimeout = TimeSpan.FromSeconds(30)
+        };
+        using var client = new XyoClient(config, httpClient);
+
+        cts.CancelAfter(50);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", cts.Token))
+            {
+            }
+        });
+    }
+
+    [Fact]
+    public async Task IdleTimeoutStream_InfiniteIdleTimeout_ReadsSuccessfully()
+    {
+        var data = new byte[] { 1, 2, 3, 4, 5 };
+        using var inner = new MemoryStream(data);
+        using var stream = new XyoClient.IdleTimeoutStream(inner, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+
+        var buffer = new byte[5];
+        int read = await stream.ReadAsync(buffer.AsMemory(0, 5));
+
+        Assert.Equal(5, read);
+        Assert.Equal(data, buffer);
+    }
 }

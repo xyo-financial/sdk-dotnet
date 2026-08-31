@@ -87,7 +87,7 @@ public sealed class XyoClientOptions
     [Obsolete("Use DownloadConnectTimeout (connection/redirect deadline) and ReadIdleTimeout (per-read stall timeout) instead. DownloadTimeout still seeds both when set, but conflates two unrelated roles and will be removed in the next major version.")]
     public TimeSpan DownloadTimeout
     {
-        get => _downloadTimeout ?? TimeSpan.FromMinutes(10);
+        get => _downloadTimeout ?? XyoClientConfig.DefaultDownloadConnectTimeout;
         set => _downloadTimeout = value;
     }
 
