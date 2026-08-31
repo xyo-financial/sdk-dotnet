@@ -949,6 +949,37 @@ public class XyoClientTests
     }
 
     [Fact]
+    public async Task StreamEnrichmentCollectionAsync_BodyTransferOutlivesDownloadConnectTimeout_StillCompletes()
+    {
+        // The defining behaviour of the split: once headers have arrived DownloadConnectTimeout is spent and
+        // must not bound the body. A regression that threaded effectiveToken into the streaming section
+        // (instead of the raw cancellationToken) would reintroduce a hard total cap and would fail here and
+        // nowhere else -- the pre-existing slow-transfer test above leaves DownloadConnectTimeout at its
+        // 10-minute default, so it would not catch that regression.
+        byte[] archiveData = TarGzOfRecords(3);
+        var mockHandler = new MockHttpMessageHandler((_, _) => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new SlowContinuousStream(archiveData, TimeSpan.FromMilliseconds(5)))
+            }));
+        using var httpClient = new HttpClient(mockHandler);
+        var config = new XyoClientConfig("xyo_test_token")
+        {
+            DownloadConnectTimeout = TimeSpan.FromMilliseconds(50),   // body transfer takes far longer
+            ReadIdleTimeout = TimeSpan.FromSeconds(10)
+        };
+        using var client = new XyoClient(config, httpClient);
+
+        int count = 0;
+        await foreach (var _ in client.StreamEnrichmentCollectionAsync("https://api.xyo.financial/batches/1.tar.gz", CancellationToken.None))
+        {
+            count++;
+        }
+
+        Assert.Equal(3, count);
+    }
+
+    [Fact]
     public async Task StreamEnrichmentCollectionAsync_PeerDripsInsideEveryIdleWindow_TripsTotalDurationBound()
     {
         // The idle timeout resets on every read, so a peer delivering a few bytes just inside each window

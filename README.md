@@ -153,6 +153,12 @@ stall detector:
 None of the three counts time your own code spends processing a yielded record between reads, so a slow
 consumer is never penalised.
 
+All three accept `Timeout.InfiniteTimeSpan` to disable the bound explicitly; any other non-positive value
+(zero or negative) throws `ArgumentOutOfRangeException` at construction. Disabling `DownloadConnectTimeout`
+removes the only bound on the connection/redirect/headers phase, so keep `MaxTotalDownloadDuration` finite if
+you disable it. Disabling `ReadIdleTimeout` also silently defeats `MaxTotalDownloadDuration`, since that
+budget is only checked once a read returns.
+
 ```csharp
 var config = new XyoClientConfig("xyo_api_key")
 {

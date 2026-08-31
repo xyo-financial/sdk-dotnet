@@ -119,7 +119,8 @@ public sealed class XyoClient : IXyoClient
                 // HttpClient.Timeout is a single TOTAL deadline that keeps running while a response stream is
                 // consumed, which would kill a multi-hundred-MB archive download mid-stream. Deadlines are
                 // enforced per call instead, via linked CancellationTokenSources: Timeout for unary calls
-                // (see SendRequestAsync) and DownloadTimeout for StreamEnrichmentCollectionAsync.
+                // (see SendRequestAsync) and DownloadConnectTimeout and ReadIdleTimeout for
+                // StreamEnrichmentCollectionAsync.
                 Timeout = System.Threading.Timeout.InfiniteTimeSpan
             };
             _ownsHttpClient = true;
@@ -445,6 +446,12 @@ public sealed class XyoClient : IXyoClient
             }
 
             await EnsureSuccessResponseAsync(response!, effectiveToken).ConfigureAwait(false);
+
+            // The connection phase is over: DownloadConnectTimeout is spent and must not reach the body.
+            // Disarming reuses the existing timer (Timer.Change under the hood) rather than leaving it
+            // scheduled to fire mid-transfer for nothing, and turns effectiveToken from "in scope but must
+            // not be used" into "in scope and inert" for the remainder of this method.
+            timeoutCts.CancelAfter(System.Threading.Timeout.InfiniteTimeSpan);
 
             using var responseStream = await response!.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
             // ReadIdleTimeout is the per-read idle bound (it trips only when the peer stops sending);

@@ -11,6 +11,17 @@ namespace Xyo.Sdk.Client;
 /// <summary>
 /// Immutable configuration options for initializing the XYO Financial SDK client.
 /// </summary>
+/// <remarks>
+/// As a <c>record</c>, structural equality (<c>==</c>, <see cref="Equals(object?)"/>,
+/// <see cref="GetHashCode"/>) compares the configuration as written, not as resolved: a config with
+/// <see cref="DownloadConnectTimeout"/> left unset (so it resolves to the ten-minute default) and one with
+/// <see cref="DownloadConnectTimeout"/> set explicitly to ten minutes compare unequal, because the two
+/// differ in their internal null-vs-set state even though every request they produce behaves identically.
+/// The same applies to <see cref="ReadIdleTimeout"/> and the obsolete <see cref="DownloadTimeout"/> alias.
+/// Do not rely on structural equality (e.g. as a <c>Dictionary</c> key, or to deduplicate configurations) to
+/// mean "these two configs behave the same" for these three members; compare the resolved properties
+/// directly instead.
+/// </remarks>
 public sealed record XyoClientConfig
 {
     private const string DefaultProductionUrl = "https://api.xyo.financial";
@@ -19,8 +30,11 @@ public sealed record XyoClientConfig
         @"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\z",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private static readonly TimeSpan DefaultDownloadConnectTimeout = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan DefaultReadIdleTimeout = TimeSpan.FromSeconds(120);
+    // Internal rather than private so XyoClientOptions can share the same defaults instead of hardcoding
+    // its own copies (see XyoClientOptions.EffectiveDownloadConnectTimeout / EffectiveReadIdleTimeout),
+    // which is what let its getters and ToConfig() disagree in the first place.
+    internal static readonly TimeSpan DefaultDownloadConnectTimeout = TimeSpan.FromMinutes(10);
+    internal static readonly TimeSpan DefaultReadIdleTimeout = TimeSpan.FromSeconds(120);
 
     [DebuggerBrowsable(DebuggerBrowsableState.Never)]
     private readonly string? _apiKey;
@@ -100,10 +114,18 @@ public sealed record XyoClientConfig
     /// to the obsolete <see cref="DownloadTimeout"/>'s value when this property is not itself set
     /// explicitly (see that property's remarks).
     /// </summary>
+    /// <remarks>
+    /// Must be a positive duration, or <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to disable
+    /// the bound entirely. Disabling it deliberately reopens a header-phase slowloris: a peer that accepts
+    /// the connection but never returns response headers can hold the call open indefinitely, so a caller
+    /// who sets this to <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> must keep
+    /// <see cref="MaxTotalDownloadDuration"/> finite, since that becomes the only remaining time bound (and
+    /// even then, only after the read phase starts -- see that property's remarks).
+    /// </remarks>
     public TimeSpan DownloadConnectTimeout
     {
         get => _downloadConnectTimeoutOverride ?? _legacyDownloadTimeout ?? DefaultDownloadConnectTimeout;
-        init => _downloadConnectTimeoutOverride = value;
+        init => _downloadConnectTimeoutOverride = ValidateDownloadTimeout(value, nameof(DownloadConnectTimeout));
     }
 
     /// <summary>
@@ -115,12 +137,15 @@ public sealed record XyoClientConfig
     /// </summary>
     /// <remarks>
     /// Does not, on its own, bound the transfer as a whole -- see <see cref="MaxTotalDownloadDuration"/> for
-    /// why a per-read idle bound alone cannot do that.
+    /// why a per-read idle bound alone cannot do that. Must be a positive duration, or
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to disable the bound entirely; disabling it
+    /// also silently defeats <see cref="MaxTotalDownloadDuration"/>, because that budget is only evaluated
+    /// after a read returns, so a read that never returns never reaches the check.
     /// </remarks>
     public TimeSpan ReadIdleTimeout
     {
         get => _readIdleTimeoutOverride ?? _legacyDownloadTimeout ?? DefaultReadIdleTimeout;
-        init => _readIdleTimeoutOverride = value;
+        init => _readIdleTimeoutOverride = ValidateDownloadTimeout(value, nameof(ReadIdleTimeout));
     }
 
     /// <summary>
@@ -142,7 +167,7 @@ public sealed record XyoClientConfig
     public TimeSpan DownloadTimeout
     {
         get => _legacyDownloadTimeout ?? DefaultDownloadConnectTimeout;
-        init => _legacyDownloadTimeout = value;
+        init => _legacyDownloadTimeout = ValidateDownloadTimeout(value, nameof(DownloadTimeout));
     }
 
     /// <summary>
@@ -157,7 +182,9 @@ public sealed record XyoClientConfig
     /// alive indefinitely, because no individual read ever stalls. The byte bounds
     /// (<see cref="MaxArchiveBytes"/>, <see cref="MaxDecompressedBytes"/>, <see cref="MaxTarEntries"/>) do
     /// not help either, since such a transfer is bounded in bytes and unbounded in time. This is the bound
-    /// that turns "a job that neither completes nor fails" into a job that fails.
+    /// that turns "a job that neither completes nor fails" into a job that fails. Note the budget is only
+    /// checked once a read returns, so a single stalled read can overshoot this bound by up to one
+    /// <see cref="ReadIdleTimeout"/> before the overshoot is caught.
     /// </remarks>
     public TimeSpan MaxTotalDownloadDuration { get; init; } = TimeSpan.FromHours(1);
 
@@ -338,7 +365,9 @@ public sealed record XyoClientConfig
     public override string ToString()
     {
         string tokenDisplay = string.IsNullOrEmpty(_apiKey) ? "(Dynamic/None)" : "[REDACTED]";
-        return $"XyoClientConfig {{ BaseUrl = '{BaseUrl}', ApiKey = '{tokenDisplay}', Timeout = {Timeout.TotalSeconds}s, CorrelationId = '{CorrelationId}', Traceparent = '{Traceparent}' }}";
+        return $"XyoClientConfig {{ BaseUrl = '{BaseUrl}', ApiKey = '{tokenDisplay}', Timeout = {Timeout.TotalSeconds}s, " +
+            $"DownloadConnectTimeout = {DownloadConnectTimeout.TotalSeconds}s, ReadIdleTimeout = {ReadIdleTimeout.TotalSeconds}s, " +
+            $"CorrelationId = '{CorrelationId}', Traceparent = '{Traceparent}' }}";
     }
 
     private static string ResolveDefaultBaseUrl()
@@ -432,6 +461,38 @@ public sealed record XyoClientConfig
                 "If BaseUrl was not set explicitly, check the XYO_API_BASE_URL environment variable.",
                 paramName, ex);
         }
+    }
+
+    /// <summary>
+    /// Validates a candidate <see cref="DownloadConnectTimeout"/>, <see cref="ReadIdleTimeout"/>, or
+    /// <see cref="DownloadTimeout"/> value: it must be a positive duration, or
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> to explicitly disable the bound.
+    /// </summary>
+    /// <remarks>
+    /// The message deliberately does not echo <paramref name="value"/>: these are network timeouts, not
+    /// secrets, but a caller misconfiguring one from an expression (e.g. a miscomputed
+    /// <c>TimeSpan.FromSeconds(-retryCount)</c>) gains nothing from the value being restated, and every
+    /// other validated member of this type (<see cref="BaseUrl"/>, <see cref="DefaultHeaders"/>,
+    /// <see cref="TrustedDownloadHosts"/>, <see cref="Traceparent"/>) follows the same convention of naming
+    /// the property and the constraint, not the offending value.
+    /// </remarks>
+    private static TimeSpan ValidateDownloadTimeout(TimeSpan value, string propertyName)
+    {
+        if (value == System.Threading.Timeout.InfiniteTimeSpan)
+        {
+            // Deliberately allowed: an explicit opt-out of this bound. See the remarks on
+            // DownloadConnectTimeout and ReadIdleTimeout for what a caller relying on this must also do.
+            return value;
+        }
+
+        if (value <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                propertyName,
+                $"{propertyName} must be a positive duration, or Timeout.InfiniteTimeSpan to disable the bound.");
+        }
+
+        return value;
     }
 
     private static bool IsLoopbackHost(string host)
