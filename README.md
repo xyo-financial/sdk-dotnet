@@ -4,7 +4,8 @@
 
 [![CI / Build & Test](https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml/badge.svg)](https://github.com/xyo-financial/sdk-dotnet/actions/workflows/makefile.yml)
 [![NuGet Package](https://img.shields.io/nuget/v/Xyo.Sdk.svg)](https://www.nuget.org/packages/Xyo.Sdk)
-![Target Framework](https://img.shields.io/badge/.NET-8.0%20%7C%209.0-512BD4)
+[![Target Framework](https://img.shields.io/badge/.NET-8.0%20%7C%209.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/download/dotnet)
+[![RFC 7807](https://img.shields.io/badge/RFC_7807-Compliant-brightgreen)](https://datatracker.ietf.org/doc/html/rfc7807)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/xyo-financial/sdk-dotnet/blob/main/LICENSE)
 [![Security Policy](https://img.shields.io/badge/Security-LTS_Guaranteed-10B981)](https://github.com/xyo-financial/sdk-dotnet/blob/main/SECURITY.md)
 
