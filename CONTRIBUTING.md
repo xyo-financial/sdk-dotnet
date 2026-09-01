@@ -5,17 +5,18 @@ Thank you for contributing to the official XYO Financial .NET Client SDK (`sdk-d
 ---
 
 ## 📑 Table of Contents
-- [🏗 1. Two-Layer Architecture](#-1-two-layer-architecture)
-- [🔀 2. Contribution Workflow & Decision Matrix](#-2-contribution-workflow--decision-matrix)
-- [⚙️ 3. Automated & Local Code Generation](#️-3-automated--local-code-generation)
-- [🛠 4. Prerequisites & Development Environment](#-4-prerequisites--development-environment)
-- [🛡 5. Quality Gates & Validation](#-5-quality-gates--validation)
-- [🧪 6. Development & Testing Guide](#-6-development--testing-guide)
-- [🚀 7. Pull Request & Commit Standards](#-7-pull-request--commit-standards)
-- [📦 8. Release & Versioning Process](#-8-release--versioning-process)
-- [📄 9. License](#-9-license)
-
----
+- [🏗 1. Two-Layer Architecture](#1-two-layer-architecture)
+- [🔀 2. Contribution Workflow & Decision Matrix](#2-contribution-workflow-decision-matrix)
+- [⚙️ 3. Automated & Local Code Generation](#3-automated-local-code-generation)
+  - [🔹 Automated Regeneration (CI/CD)](#automated-regeneration-cicd)
+  - [🔹 Local Regeneration](#local-regeneration)
+  - [📋 Generated Code Policy](#generated-code-policy)
+- [🛠 4. Prerequisites & Development Environment](#4-prerequisites-development-environment)
+- [🛡 5. Quality Gates & Validation](#5-quality-gates-validation)
+- [🧪 6. Development & Testing Guide](#6-development-testing-guide)
+- [🚀 7. Pull Request & Commit Standards](#7-pull-request-commit-standards)
+- [📦 8. Release & Versioning Process](#8-release-versioning-process)
+- [📄 9. License](#9-license)
 
 ## 🏗 1. Two-Layer Architecture
 
@@ -57,10 +58,10 @@ The codebase strictly enforces a two-layer separation of concerns:
 
 ## ⚙️ 3. Automated & Local Code Generation
 
-### Automated Regeneration (CI/CD)
+### 🔹 Automated Regeneration (CI/CD)
 When an OpenAPI spec is tagged in `xyo-financial/specs`, GitHub Actions dispatches a `spec_tagged` event to `.github/workflows/generate.yml`, regenerating `src/Xyo.Generated/`, running the test suite, and creating a pull request or commit.
 
-### Local Regeneration
+### 🔹 Local Regeneration
 To regenerate the client locally against a local checkout of specs:
 
 ```bash
@@ -69,7 +70,7 @@ make generate
 
 ---
 
-### Generated Code Policy
+### 📋 Generated Code Policy
 
 > [!IMPORTANT]
 > `src/Xyo.Generated/` is produced by OpenAPI Generator and is committed **exactly as the generator emits it**.
@@ -100,13 +101,13 @@ If generated output is wrong, fix it at source, never in the output:
 Before submitting a Pull Request, ensure all local verification checks pass:
 
 ```bash
-# Build solution
+# 🤝 Build solution
 dotnet build Xyo.Sdk.sln -c Release
 
-# Run test suite with code coverage
+# 🤝 Run test suite with code coverage
 dotnet test Xyo.Sdk.sln -c Release --collect:"XPlat Code Coverage"
 
-# Verify code formatting
+# 🤝 Verify code formatting
 dotnet format Xyo.Sdk.sln --verify-no-changes
 ```
 
